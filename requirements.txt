@@ -1,0 +1,8 @@
+# Development / testing on a PC (on the Raspberry Pi itself, use apt packages
+# instead — see scripts/install.sh — because picamera2 and a HW-accelerated
+# OpenCV come from the Raspberry Pi OS repositories).
+numpy>=1.24
+opencv-python-headless>=4.6
+PyYAML>=6.0
+flask>=2.2
+pytest>=7.0

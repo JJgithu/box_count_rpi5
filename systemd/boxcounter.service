@@ -1,0 +1,24 @@
+[Unit]
+Description=Conveyor box counter (Pi 5 + IMX219)
+After=multi-user.target
+
+[Service]
+# notify + watchdog: the loop pings sd_notify ~1x/s (pipeline.py). If it ever
+# hangs — e.g. a CSI camera stall where capture blocks with no exception —
+# the pings stop and systemd kills+restarts the process. This is the one
+# failure mode a same-process watchdog cannot recover from.
+Type=notify
+WatchdogSec=15
+# install.sh replaces __USER__ and __APPDIR__ with the real values
+User=__USER__
+WorkingDirectory=__APPDIR__
+ExecStart=/usr/bin/python3 -m boxcounter --config __APPDIR__/config/config.yaml
+# always (not on-failure): a transient camera EOF that exits 0 must still restart
+Restart=always
+RestartSec=5
+# Keep the counter from ever destabilizing a 2 GB system
+MemoryMax=512M
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target

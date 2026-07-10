@@ -1,0 +1,103 @@
+# ============================================================================
+# Box counter configuration — Raspberry Pi 5 (2 GB) + IMX219 CSI camera
+# ============================================================================
+# Geometry values (roi, line_position, *_frac) are FRACTIONS of the frame,
+# so this file keeps working if you change the capture resolution.
+# After editing, restart the service:  sudo systemctl restart boxcounter
+# ============================================================================
+
+camera:
+  source: picamera            # picamera | video | usb
+  width: 640                  # 640x480 is the sweet spot on a 2 GB Pi 5:
+  height: 480                 #   full frame rate, tiny memory footprint
+  fps: 30
+  # IMX219 2x2-binned full-field-of-view sensor mode. Keep this: without it
+  # libcamera may pick a cropped mode and you lose sight of the belt edges.
+  sensor_size: [1640, 1232]
+  hflip: false
+  vflip: false
+  warmup_seconds: 3           # let auto-exposure settle on the empty belt
+  lock_exposure: true         # then freeze it — REQUIRED for stable detection
+  exposure_time_us: 0         # >0 = fully manual exposure (microseconds)
+  analogue_gain: 0.0          # >0 = fixed gain, used with exposure_time_us
+
+processing:
+  # Region of interest [x, y, w, h] as fractions: crop to the belt surface so
+  # conveyor rails, rollers and passers-by are never seen by the detector.
+  roi: [0.05, 0.0, 0.90, 1.0]
+
+  method: mog2                # mog2 = adaptive model (default)
+                              # static = diff against a captured empty-belt
+                              #          image (tools/capture_background.py)
+  background_image: data/background.png
+  use_color: true             # keep true: cardboard vs gray belt often has
+                              # color contrast but little brightness contrast
+
+  # --- mog2 tuning ---
+  mog2_history: 400           # frames of memory in the background model
+  mog2_var_threshold: 32      # higher = less sensitive (fewer false blobs)
+  detect_shadows: true        # detect & ignore shadows cast by boxes
+  learning_rate: -1           # -1 = automatic
+  freeze_learning_fg_fraction: 0.02   # only update the background model when
+                                      # the belt is (nearly) empty; prevents
+                                      # steady box traffic from being learned
+                                      # as "background" and then missed
+  relearn_fg_fraction: 0.9            # escape hatch trigger: only when THIS
+                                      # much of the ROI stays foreground (a
+                                      # global lighting/exposure change, not
+                                      # discrete boxes) does the relearn timer
+                                      # run. Keep near 1.0.
+  relearn_after_freeze_frames: 150    # if the belt stays ~fully foreground for
+                                      # this many frames (~5 s @ 30 fps),
+                                      # rebuild the model so the detector can
+                                      # never latch up blind. 0 disables.
+
+  # --- static method tuning ---
+  static_diff_threshold: 35   # min gray-level difference belt vs box
+
+  # --- mask cleanup ---
+  blur_kernel: 5              # pre-blur to suppress sensor noise (odd, 0=off)
+  open_kernel: 5              # remove small speckles
+  close_kernel: 31            # IMPORTANT for open boxes: fuses the rim
+                              # fragments of a box whose interior looks like
+                              # the belt. Roughly 1/4 of box width in pixels.
+  dilate_kernel: 0            # extra growth of blobs (usually 0)
+
+  # --- blob filtering ---
+  min_area_frac: 0.01         # smallest accepted blob (fraction of ROI area)
+  max_area_frac: 0.60         # largest accepted blob
+  merge_gap_px: 24            # blobs closer than this merge into one box
+  warmup_frames: 60           # ignore detections while the model settles
+
+tracking:
+  max_distance_frac: 0.15     # match radius as fraction of frame diagonal;
+                              # raise for fast belts, lower for dense traffic
+  max_disappeared: 10         # frames a box may vanish before losing its ID
+  min_hits: 3                 # detections needed before a box may be counted
+
+counting:
+  axis: y                     # belt travel axis in the image: y = vertical
+  line_position: 0.55         # counting line at 55% of frame height
+  hysteresis_frac: 0.03       # dead band: must clear the line by 3% to count
+  direction: positive         # positive = downward/rightward in the image,
+                              # negative = upward/leftward, any = both
+  min_travel_frac: 0.10       # must have moved 10% of the frame to count
+
+output:
+  data_dir: data              # SQLite DB + daily CSV files live here
+  sqlite: true
+  csv: true
+  log_level: INFO
+  heartbeat_seconds: 30       # status log line interval
+
+gpio:
+  enabled: false              # true = pulse a GPIO pin for every counted box
+  pin: 17                     # BCM pin number (physical pin 11)
+  active_high: true
+  pulse_ms: 50
+
+web:
+  enabled: true               # LAN-only dashboard — works fully offline
+  host: 0.0.0.0
+  port: 8080
+  jpeg_quality: 70
