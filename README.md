@@ -49,11 +49,9 @@ it, you can swap in a TFLite/NCNN model without touching tracking or counting.
 ## Quick start (on the Pi)
 
 ```bash
-# Raspberry Pi OS Lite has no git preinstalled, and this repo is private:
+# Raspberry Pi OS Lite has no git preinstalled:
 sudo apt-get update && sudo apt-get install -y git
-# then authenticate (Personal Access Token / SSH key / gh) — or just copy the
-# repo over with scp. See docs/IMPLEMENTATION_GUIDE.md section 4 for all paths.
-git clone https://github.com/JJgithu/box_count_rpi5.git
+git clone https://github.com/JJgithu/box_count_rpi5.git   # public repo: no auth
 cd box_count_rpi5
 bash scripts/install.sh                      # apt packages + systemd unit
 python3 tools/calibrate.py                   # snapshot with grid/ROI/line overlay
@@ -61,10 +59,11 @@ python3 -m boxcounter                        # run; dashboard at http://<pi>:808
 sudo systemctl enable --now boxcounter       # run at every boot
 ```
 
-> Private repo + offline target: the cleanest route is to **not clone on the
-> Pi at all** — copy the code across with `scp`/USB from a machine that
-> already has it. Full details (git install, tokens, SSH keys, air-gapped
-> apt) are in [docs/IMPLEMENTATION_GUIDE.md](docs/IMPLEMENTATION_GUIDE.md) §4.
+> If the repo is **private**, authenticate first (token / SSH key / gh). For an
+> offline target the cleanest route is to **not clone on the Pi at all** — copy
+> the code across with `scp`/USB from a machine that already has it. All paths
+> (git install, auth, air-gapped apt) are in
+> [docs/IMPLEMENTATION_GUIDE.md](docs/IMPLEMENTATION_GUIDE.md) §4.
 
 ## Try it without any hardware
 

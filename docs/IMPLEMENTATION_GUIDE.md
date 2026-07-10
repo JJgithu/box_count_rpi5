@@ -56,19 +56,27 @@ Full details with the math in [HARDWARE_SETUP.md](HARDWARE_SETUP.md). Summary:
 
 ## 4. Get the code onto the Pi
 
-Raspberry Pi OS **Lite does not ship with git**, and this repository is
-**private**, so a bare `git clone` will fail with "repository not found".
-Pick whichever of the two paths fits your setup.
+Raspberry Pi OS **Lite does not ship with git**, so install it first no
+matter how you get the code. If the repo is **public**, a plain clone then
+works; if it is **private**, you must authenticate first (a bare clone of a
+private repo fails with "repository not found"). Pick whichever path fits.
 
 ### Path A — clone on the Pi (Pi has internet during setup)
 
-Install git, then authenticate to the private repo with **one** of the
-methods below.
+Install git:
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y git
 ```
+
+**If the repo is public**, just clone it — no credentials needed:
+
+```bash
+git clone https://github.com/JJgithu/box_count_rpi5.git
+```
+
+**If the repo is private**, authenticate with **one** of A1–A3 below.
 
 **A1. HTTPS + Personal Access Token (simplest).**
 Create a token on GitHub: *Settings → Developer settings → Personal access
