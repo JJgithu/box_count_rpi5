@@ -54,18 +54,83 @@ Full details with the math in [HARDWARE_SETUP.md](HARDWARE_SETUP.md). Summary:
    If not detected, re-seat the ribbon (contacts facing the correct side at
    both ends) — see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
-## 4. Software installation
+## 4. Get the code onto the Pi
+
+Raspberry Pi OS **Lite does not ship with git**, and this repository is
+**private**, so a bare `git clone` will fail with "repository not found".
+Pick whichever of the two paths fits your setup.
+
+### Path A — clone on the Pi (Pi has internet during setup)
+
+Install git, then authenticate to the private repo with **one** of the
+methods below.
 
 ```bash
-git clone https://github.com/JJgithu/box_count_rpi5.git   # or copy the repo over
+sudo apt-get update
+sudo apt-get install -y git
+```
+
+**A1. HTTPS + Personal Access Token (simplest).**
+Create a token on GitHub: *Settings → Developer settings → Personal access
+tokens → Fine-grained tokens*, scope it to the `box_count_rpi5` repo with
+**Contents: Read-only**, then:
+
+```bash
+git clone https://github.com/JJgithu/box_count_rpi5.git
+# Username: your GitHub username (JJgithu)
+# Password: paste the token (NOT your GitHub password)
+```
+
+To avoid re-typing it on future `git pull`s, cache it:
+`git config --global credential.helper store` (writes the token to
+`~/.git-credentials` in plain text — fine on a dedicated appliance).
+
+**A2. SSH key** (nicer for long-lived machines):
+
+```bash
+ssh-keygen -t ed25519 -C "pi-boxcounter"     # press Enter through the prompts
+cat ~/.ssh/id_ed25519.pub                     # add this to GitHub: Settings
+                                              #  -> SSH and GPG keys -> New key
+git clone git@github.com:JJgithu/box_count_rpi5.git
+```
+
+**A3. GitHub CLI:** `sudo apt-get install -y gh && gh auth login` (choose
+HTTPS, authenticate in a browser/device code), then clone as in A1 without a
+manual token.
+
+### Path B — transfer the code (air-gapped Pi, recommended for a true offline box)
+
+Since the counter is meant to run offline, the Pi never actually needs GitHub
+access. On a computer that already has the repo, copy it over — no git,
+tokens, or keys on the Pi at all:
+
+```bash
+# On your PC (has network + the repo). Either clone or download the ZIP from
+# GitHub ("Code -> Download ZIP"), then:
+scp -r box_count_rpi5 <pi-user>@boxcounter.local:~/     # or use a USB stick
+```
+
+(You can also `git clone` on the PC and `rsync -a box_count_rpi5/ pi@boxcounter:~/box_count_rpi5/`.)
+
+## 4b. Install dependencies
+
+```bash
 cd box_count_rpi5
 bash scripts/install.sh
 ```
 
 The script installs everything from the Raspberry Pi OS repositories
 (`python3-picamera2`, `python3-opencv`, `python3-numpy`, `python3-yaml`,
-`python3-flask`, `python3-gpiozero`) — no pip, no compilation — and installs
-(but does not yet enable) the systemd service.
+`python3-flask`, `python3-gpiozero`, `python3-lgpio`) — no pip, no
+compilation — and installs (but does not yet enable) the systemd service.
+
+> **`install.sh` needs apt access** (network, or a local mirror). For a
+> fully air-gapped Pi, pre-download the `.deb`s on a networked Pi of the same
+> OS version with
+> `apt-get install --download-only -y python3-picamera2 python3-opencv python3-numpy python3-yaml python3-flask python3-gpiozero python3-lgpio rpicam-apps`,
+> copy `/var/cache/apt/archives/*.deb` to the target, and
+> `sudo dpkg -i *.deb`. After this one-time install the system runs with no
+> network forever.
 
 ## 5. Calibration
 

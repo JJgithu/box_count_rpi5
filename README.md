@@ -49,6 +49,10 @@ it, you can swap in a TFLite/NCNN model without touching tracking or counting.
 ## Quick start (on the Pi)
 
 ```bash
+# Raspberry Pi OS Lite has no git preinstalled, and this repo is private:
+sudo apt-get update && sudo apt-get install -y git
+# then authenticate (Personal Access Token / SSH key / gh) — or just copy the
+# repo over with scp. See docs/IMPLEMENTATION_GUIDE.md section 4 for all paths.
 git clone https://github.com/JJgithu/box_count_rpi5.git
 cd box_count_rpi5
 bash scripts/install.sh                      # apt packages + systemd unit
@@ -57,13 +61,18 @@ python3 -m boxcounter                        # run; dashboard at http://<pi>:808
 sudo systemctl enable --now boxcounter       # run at every boot
 ```
 
+> Private repo + offline target: the cleanest route is to **not clone on the
+> Pi at all** — copy the code across with `scp`/USB from a machine that
+> already has it. Full details (git install, tokens, SSH keys, air-gapped
+> apt) are in [docs/IMPLEMENTATION_GUIDE.md](docs/IMPLEMENTATION_GUIDE.md) §4.
+
 ## Try it without any hardware
 
 ```bash
 pip install -r requirements.txt
 python3 tools/make_test_video.py --out data/test.mp4 --boxes 12
 python3 -m boxcounter --source data/test.mp4 --no-web
-python3 -m pytest tests/                     # 33 tests incl. exact-count e2e
+python3 -m pytest tests/                     # 38 tests incl. exact-count e2e
 ```
 
 ## Documentation
