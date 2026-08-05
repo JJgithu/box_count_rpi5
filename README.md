@@ -79,6 +79,7 @@ python3 -m pytest tests/                     # 38 tests incl. exact-count e2e
 | Document | Contents |
 |---|---|
 | [docs/IMPLEMENTATION_GUIDE.md](docs/IMPLEMENTATION_GUIDE.md) | **Start here** — complete step-by-step deployment walkthrough |
+| [docs/RUNNING.md](docs/RUNNING.md) | Day-to-day operation: starting, stopping, logs, reading counts |
 | [docs/HARDWARE_SETUP.md](docs/HARDWARE_SETUP.md) | Mounting height/FoV math, lighting, wiring, GPIO to PLC |
 | [docs/CALIBRATION.md](docs/CALIBRATION.md) | Every tunable parameter, with symptom → fix tables |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common problems and their causes |
