@@ -19,6 +19,9 @@ from .tracker import Track
 log = logging.getLogger(__name__)
 
 
+from typing import Optional
+
+
 @dataclass
 class CountEvent:
     ts: float
@@ -26,17 +29,35 @@ class CountEvent:
     bbox: Tuple[int, int, int, int]
     area: float
     direction: int      # +1 = crossed toward increasing coordinate
+    # Filled in by the pipeline from the packing monitor, when enabled:
+    pieces: Optional[int] = None          # pads placed into this box
+    pack_seconds: Optional[float] = None  # arrival -> departure at the station
+
+
+_EDGE_PX = 2      # bbox closer than this to a travel-axis frame edge = touching
 
 
 class LineCounter:
     def __init__(self, axis: str, line_px: float, hysteresis_px: float,
-                 direction: str, min_travel_px: float, min_hits: int):
+                 direction: str, min_travel_px: float, min_hits: int,
+                 bounds_px: Optional[Tuple[float, float]] = None):
         self.axis_index = 0 if axis == "x" else 1
         self.line = float(line_px)
         self.hyst = max(0.0, float(hysteresis_px))
         self.direction = direction          # positive | negative | any
         self.min_travel = float(min_travel_px)
         self.min_hits = int(min_hits)
+        # Extent of the detector's view along the travel axis (the ROI edges,
+        # since detections are clipped to the ROI). When set, a track whose
+        # bbox touches either travel-axis edge cannot ACQUIRE a confident-side
+        # state: a packer's arm (always connected to an edge) therefore never
+        # builds the "was before the line" history needed to be counted, no
+        # matter how its blob moves. Crossings themselves stay honoured, so a
+        # long box whose tail is already clipped at the exit edge while its
+        # centroid crosses is still counted from the history it gained while
+        # fully inside.
+        self.bounds = (float(bounds_px[0]), float(bounds_px[1])) \
+            if bounds_px is not None else None
         # Per track: have we ever seen it confidently before / past the line?
         # These are geometric facts, updated every frame and never consumed —
         # so the count gates (min_hits / min_travel / direction) can be
@@ -56,6 +77,17 @@ class LineCounter:
             tid = tr.track_id
             live_ids.add(tid)
             p = tr.centroid[self.axis_index]
+
+            touching = False
+            if self.bounds is not None:
+                b_lo, b_hi = self.bounds
+                # A coasted track drifting out of view can neither gain sides
+                # nor cross.
+                if p < b_lo or p > b_hi:
+                    continue
+                lo = tr.bbox[self.axis_index]
+                hi = lo + tr.bbox[self.axis_index + 2]
+                touching = lo < b_lo + _EDGE_PX or hi > b_hi - _EDGE_PX
 
             # Which side is the track confidently on this frame (None = in the
             # hysteresis dead band)?
@@ -93,11 +125,13 @@ class LineCounter:
                     ))
                     log.debug("Counted track %d (travel %.0f px)", tid, travel)
 
-            # Record the confident side AFTER the crossing check.
-            if side == -1:
-                self._seen_minus[tid] = True
-            elif side == +1:
-                self._seen_plus[tid] = True
+            # Record the confident side AFTER the crossing check — and never
+            # while the bbox touches a travel-axis edge (see bounds above).
+            if not touching:
+                if side == -1:
+                    self._seen_minus[tid] = True
+                elif side == +1:
+                    self._seen_plus[tid] = True
 
         # Drop per-track state for tracks that no longer exist.
         for store in (self._seen_minus, self._seen_plus):

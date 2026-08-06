@@ -30,6 +30,12 @@ class FrameSource:
     def read(self) -> Optional[np.ndarray]:
         raise NotImplementedError
 
+    def media_time(self) -> Optional[float]:
+        """Seconds of media position for finite sources (video files), so
+        durations measured while processing faster/slower than real time stay
+        correct. Live sources return None and the caller uses the wall clock."""
+        return None
+
     def stop(self) -> None:
         pass
 
@@ -135,6 +141,7 @@ class VideoFileSource(FrameSource):
         self.fps = fps_hint
         self.cap = None
         self._next_deadline = 0.0
+        self._frames_read = 0
 
     def start(self) -> None:
         import cv2
@@ -156,12 +163,16 @@ class VideoFileSource(FrameSource):
             ok, frame = self.cap.read()
             if not ok:
                 return None
+        self._frames_read += 1
         if self.realtime:
             now = time.monotonic()
             if now < self._next_deadline:
                 time.sleep(self._next_deadline - now)
             self._next_deadline = max(now, self._next_deadline) + 1.0 / self.fps
         return frame
+
+    def media_time(self) -> Optional[float]:
+        return self._frames_read / self.fps if self.fps > 0 else None
 
     def stop(self) -> None:
         if self.cap is not None:

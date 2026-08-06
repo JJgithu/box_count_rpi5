@@ -98,6 +98,54 @@ class CountingConfig:
 
 
 @dataclass
+class PackingConfig:
+    """Packing-station monitoring: pieces placed into each box + pack time.
+
+    A box that stops inside the zone becomes the "active" box. Each time the
+    packer's arm reaches into it (foreground appearing in a ring around the
+    box) and real motion happens inside the box, one insertion is counted.
+    The session ends when the box departs; its piece count and pack time are
+    attached to the box's count event when it crosses the counting line.
+    """
+    enabled: bool = False
+    # Zone [x, y, w, h] (fractions of frame) where boxes stop to be packed.
+    # Keep it upstream of (not overlapping) the counting line.
+    zone: List[float] = field(default_factory=lambda: [0.0, 0.05, 1.0, 0.55])
+    # -- box dwell / departure --
+    dwell_speed_px: float = 1.5       # slower than this = box has stopped
+    dwell_frames: int = 5             # consecutive slow frames to activate
+    # A box must have been seen ARRIVING (moved at least this many pixels
+    # since first tracked) before it can start a session. Keeps stationary
+    # ghost blobs (e.g. after a background rebuild) from capturing sessions.
+    min_arrival_px: float = 30.0
+    depart_frames: int = 5            # consecutive gone/out-of-zone frames to end
+    track_grace_frames: int = 60      # survive lost tracking (packer occlusion)
+    max_session_s: float = 600.0      # abandon a session after this long
+    # -- arm detection (ring around the box) --
+    ring_px: int = 28                 # width of the band around the box bbox
+    arm_enter_frac: float = 0.06      # ring foreground fraction = arm present
+    arm_exit_frac: float = 0.03       # hysteresis: below this = arm gone
+    enter_frames: int = 2             # debounce on entry
+    exit_frames: int = 3              # debounce on exit
+    min_visit_frames: int = 4         # shorter visits are ignored (flicker)
+    # If the "hand present" state persists this long with no motion inside the
+    # box, the occupant is static (e.g. the next box queued into the watch
+    # band) — the visit is closed and the new scene adopted as baseline.
+    static_exit_frames: int = 36
+    max_visit_frames: int = 300       # hard backstop for a stuck visit
+    # -- insertion confirmation (inside the box) --
+    interior_inset_frac: float = 0.12 # shrink bbox by this to get the interior
+    motion_threshold: int = 18        # gray-level delta that counts as motion
+    interior_motion_frac: float = 0.04  # interior motion needed during a visit
+    appearance_check: bool = False    # also require the interior to LOOK
+    appearance_delta: float = 4.0     # different after the visit (mean |diff|)
+    # -- accounting --
+    pieces_per_visit: int = 1         # pads placed per reach (fixed bundles)
+    expected_pieces: int = 0          # warn when a box leaves with a different
+                                      # count; 0 disables the check
+
+
+@dataclass
 class OutputConfig:
     data_dir: str = "data"
     sqlite: bool = True
@@ -128,6 +176,7 @@ class AppConfig:
     processing: ProcessingConfig = field(default_factory=ProcessingConfig)
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     counting: CountingConfig = field(default_factory=CountingConfig)
+    packing: PackingConfig = field(default_factory=PackingConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     gpio: GpioConfig = field(default_factory=GpioConfig)
     web: WebConfig = field(default_factory=WebConfig)
@@ -179,6 +228,39 @@ def _validate(cfg: AppConfig) -> None:
     if cfg.tracking.min_hits < 1:
         errors.append("tracking.min_hits must be >= 1")
 
+    pk = cfg.packing
+    if pk.enabled:
+        zone = pk.zone
+        if len(zone) != 4 or not all(isinstance(v, (int, float)) for v in zone):
+            errors.append("packing.zone must be [x, y, w, h] fractions")
+        else:
+            x, y, w, h = zone
+            if not (0.0 <= x < 1.0 and 0.0 <= y < 1.0 and 0.0 < w <= 1.0 and 0.0 < h <= 1.0
+                    and x + w <= 1.0 + 1e-9 and y + h <= 1.0 + 1e-9):
+                errors.append(f"packing.zone {zone} out of bounds (fractions of frame)")
+            elif cfg.counting.axis == "y" and y + h > cfg.counting.line_position:
+                log.warning("packing.zone reaches past the counting line "
+                            "(zone ends at %.2f, line at %.2f) — the box should "
+                            "finish packing before it is counted",
+                            y + h, cfg.counting.line_position)
+            # The detector only sees inside processing.roi; a packing zone
+            # outside it can never detect an arm.
+            rx, ry, rw, rh = cfg.processing.roi
+            if (x < rx - 1e-9 or y < ry - 1e-9
+                    or x + w > rx + rw + 1e-9 or y + h > ry + rh + 1e-9):
+                log.warning("packing.zone %s extends outside processing.roi %s "
+                            "— arm detection is blind outside the ROI; align "
+                            "the zone (and leave ring_px of ROI margin around "
+                            "the parked box)", zone, cfg.processing.roi)
+        if not (0.0 < pk.arm_exit_frac < pk.arm_enter_frac < 1.0):
+            errors.append("packing: need 0 < arm_exit_frac < arm_enter_frac < 1")
+        if pk.ring_px < 4:
+            errors.append("packing.ring_px must be >= 4")
+        if pk.pieces_per_visit < 1:
+            errors.append("packing.pieces_per_visit must be >= 1")
+        if pk.min_visit_frames < 1 or pk.max_visit_frames <= pk.min_visit_frames:
+            errors.append("packing: need 1 <= min_visit_frames < max_visit_frames")
+
     if errors:
         raise ValueError("Invalid configuration:\n  - " + "\n  - ".join(errors))
 
@@ -200,6 +282,7 @@ def load_config(path: str | Path) -> AppConfig:
         processing=_build(ProcessingConfig, raw.get("processing"), "processing"),
         tracking=_build(TrackingConfig, raw.get("tracking"), "tracking"),
         counting=_build(CountingConfig, raw.get("counting"), "counting"),
+        packing=_build(PackingConfig, raw.get("packing"), "packing"),
         output=_build(OutputConfig, raw.get("output"), "output"),
         gpio=_build(GpioConfig, raw.get("gpio"), "gpio"),
         web=_build(WebConfig, raw.get("web"), "web"),

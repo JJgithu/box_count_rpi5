@@ -91,6 +91,9 @@ class BoxDetector:
         self._prev_fg_fraction = 0.0
         self._frozen_frames = 0        # consecutive frames with learning frozen
         self._relearn_blank = 0        # frames to blank after a model rebuild
+        # Set when the escape hatch rebuilds the model mid-run; the pipeline
+        # reads and clears it to reset downstream state (tracker, packing).
+        self.relearned = False
 
     @property
     def roi_px(self) -> Tuple[int, int, int, int]:
@@ -147,6 +150,7 @@ class BoxDetector:
         self._prev_fg_fraction = 0.0
         self._frozen_frames = 0
         self._relearn_blank = 0
+        self.relearned = False
 
     def process(self, frame: np.ndarray) -> Tuple[List[Detection], np.ndarray]:
         """Return (detections in full-frame coords, binary ROI mask for debug)."""
@@ -194,6 +198,7 @@ class BoxDetector:
                     detectShadows=cfg.detect_shadows)
                 self._frozen_frames = 0
                 self._relearn_blank = max(cfg.mog2_history // 4, 30)
+                self.relearned = True   # pipeline resets tracker/packing state
                 lr = -1  # let the fresh model adapt quickly
             fg = self._subtractor.apply(proc, learningRate=lr)
             # MOG2 marks shadows as 127; keep only definite foreground (255).

@@ -203,6 +203,15 @@ fragmenting the raw mask into a rim, but the morphological close
 Rule of thumb: `close_kernel` ≈ ¼ of a box's width **in pixels**. If open
 boxes show up as two tracked halves in the live view, raise these two values.
 
+### Packing station (pieces per box + pack time)
+
+If a packer fills the boxes under this camera, enable the packing monitor —
+it counts the pieces placed into each box and times each pack from the same
+camera. Set the `packing:` section of the config (`enabled: true`, and
+`zone` to where boxes stop; the shipped config has it on). Layout, concept
+and tuning live in [PACKING.md](PACKING.md); verify on your bench with
+`tools/make_packing_video.py` before deploying.
+
 ## 6. Verify counting accuracy
 
 Let a known batch through — e.g. 20 boxes, mixed open/closed, at production

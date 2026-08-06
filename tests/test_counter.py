@@ -86,6 +86,63 @@ def test_min_travel_blocks_noise_blob():
     assert events == [], "short travel across the line must not count"
 
 
+def feed(counter, tr, bbox, cy):
+    tr.update(Detection(bbox=bbox, centroid=(350.0, float(cy)),
+                        area=float(bbox[2] * bbox[3])))
+    return counter.update([tr])
+
+
+def test_tall_box_near_exit_edge_still_counted():
+    """A box taller than twice the line-to-edge distance touches the exit edge
+    before its centroid crosses; the crossing must still be honoured from the
+    side-state gained while it was fully inside the view."""
+    c = LineCounter(axis="y", line_px=374, hysteresis_px=14,
+                    direction="positive", min_travel_px=48, min_hits=3,
+                    bounds_px=(0.0, 480.0))
+    h = 200
+    top = 40.0
+    tr = None
+    events = []
+    while top < 500:
+        y0 = int(top)
+        y1 = min(480, y0 + h)          # detector clips the bbox at the edge
+        if y1 - y0 < 30:               # box nearly gone
+            break
+        bbox = (300, y0, 100, y1 - y0)
+        cy = (y0 + y1) / 2
+        if tr is None:
+            tr = Track(1, Detection(bbox=bbox, centroid=(350.0, cy),
+                                    area=float(100 * (y1 - y0))))
+            events += c.update([tr])
+        else:
+            events += feed(c, tr, bbox, cy)
+        top += 8
+    assert len(events) == 1, "tall box lost at the exit edge"
+
+
+def test_edge_connected_arm_never_counted():
+    """An arm-like blob always connected to the exit edge sweeps its centroid
+    across the line (extend + retract) — it must never gain side state, so it
+    can never be counted, in either direction mode."""
+    for direction in ("positive", "any"):
+        c = LineCounter(axis="y", line_px=374, hysteresis_px=14,
+                        direction=direction, min_travel_px=20, min_hits=1,
+                        bounds_px=(0.0, 480.0))
+        tr = None
+        events = []
+        # tip extends from the bottom edge up to y=200, then retracts
+        for tip in list(range(470, 200, -20)) + list(range(200, 500, 20)):
+            bbox = (300, max(0, tip), 80, 480 - max(0, tip))   # pinned to edge
+            cy = (tip + 480) / 2
+            if tr is None:
+                tr = Track(2, Detection(bbox=bbox, centroid=(340.0, cy),
+                                        area=float(bbox[2] * bbox[3])))
+                events += c.update([tr])
+            else:
+                events += feed(c, tr, bbox, cy)
+        assert events == [], f"arm counted with direction={direction}"
+
+
 def test_state_purged_for_dead_tracks():
     c = new_counter()
     _, tr = step_counter(c, 8, [100, 150, 200])

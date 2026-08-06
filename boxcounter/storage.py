@@ -28,7 +28,9 @@ CREATE TABLE IF NOT EXISTS events (
     track_id INTEGER,
     x INTEGER, y INTEGER, w INTEGER, h INTEGER,
     area REAL,
-    direction INTEGER
+    direction INTEGER,
+    pieces INTEGER,
+    pack_seconds REAL
 );
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE TABLE IF NOT EXISTS meta (
@@ -52,6 +54,12 @@ class CountStore:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.executescript(_SCHEMA)
+            # migrate pre-packing databases in place
+            for col, typ in (("pieces", "INTEGER"), ("pack_seconds", "REAL")):
+                try:
+                    self._conn.execute(f"ALTER TABLE events ADD COLUMN {col} {typ}")
+                except sqlite3.OperationalError:
+                    pass    # column already exists
             self._conn.commit()
 
     def _last_reset_id(self) -> int:
@@ -72,9 +80,11 @@ class CountStore:
                 if self._conn is not None:
                     x, y, w, h = ev.bbox
                     self._conn.execute(
-                        "INSERT INTO events (ts, iso, track_id, x, y, w, h, area, direction)"
-                        " VALUES (?,?,?,?,?,?,?,?,?)",
-                        (ev.ts, iso, ev.track_id, x, y, w, h, ev.area, ev.direction))
+                        "INSERT INTO events (ts, iso, track_id, x, y, w, h, area,"
+                        " direction, pieces, pack_seconds) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        (ev.ts, iso, ev.track_id, x, y, w, h, ev.area, ev.direction,
+                         ev.pieces,
+                         round(ev.pack_seconds, 2) if ev.pack_seconds is not None else None))
                     self._conn.commit()
         except Exception:
             log.exception("SQLite write failed; continuing without persisting event")
@@ -84,17 +94,27 @@ class CountStore:
             except OSError:
                 log.exception("CSV write failed; continuing")
 
+    _CSV_HEADER = ["timestamp", "track_id", "x", "y", "w", "h",
+                   "area", "direction", "pieces", "pack_seconds"]
+
     def _append_csv(self, ev: CountEvent, iso: str) -> None:
         day = datetime.fromtimestamp(ev.ts).strftime("%Y-%m-%d")
         path = self.data_dir / f"events_{day}.csv"
+        # A day file left by an older version has a shorter header; roll to a
+        # sibling file instead of appending mismatched rows under it.
+        if path.exists():
+            with open(path, newline="") as f:
+                if next(csv.reader(f), None) != self._CSV_HEADER:
+                    path = self.data_dir / f"events_{day}_v2.csv"
         new_file = not path.exists()
         with open(path, "a", newline="") as f:
             writer = csv.writer(f)
             if new_file:
-                writer.writerow(["timestamp", "track_id", "x", "y", "w", "h",
-                                 "area", "direction"])
+                writer.writerow(self._CSV_HEADER)
             x, y, w, h = ev.bbox
-            writer.writerow([iso, ev.track_id, x, y, w, h, int(ev.area), ev.direction])
+            writer.writerow([iso, ev.track_id, x, y, w, h, int(ev.area), ev.direction,
+                             "" if ev.pieces is None else ev.pieces,
+                             "" if ev.pack_seconds is None else round(ev.pack_seconds, 2)])
 
     def total(self) -> int:
         """Count of events since the last reset (0 if SQLite disabled)."""
@@ -103,6 +123,16 @@ class CountStore:
                 return 0
             row = self._conn.execute(
                 "SELECT COUNT(*) FROM events WHERE id > ?",
+                (self._last_reset_id(),)).fetchone()
+            return int(row[0])
+
+    def pieces_total(self) -> int:
+        """Sum of pieces since the last reset (0 if SQLite disabled)."""
+        with self._lock:
+            if self._conn is None:
+                return 0
+            row = self._conn.execute(
+                "SELECT COALESCE(SUM(pieces), 0) FROM events WHERE id > ?",
                 (self._last_reset_id(),)).fetchone()
             return int(row[0])
 
@@ -122,10 +152,11 @@ class CountStore:
             if self._conn is None:
                 return []
             rows = self._conn.execute(
-                "SELECT iso, track_id, w, h, direction FROM events"
-                " ORDER BY id DESC LIMIT ?", (n,)).fetchall()
+                "SELECT iso, track_id, w, h, direction, pieces, pack_seconds"
+                " FROM events ORDER BY id DESC LIMIT ?", (n,)).fetchall()
         return [{"time": r[0], "track_id": r[1], "w": r[2], "h": r[3],
-                 "direction": r[4]} for r in rows]
+                 "direction": r[4], "pieces": r[5], "pack_seconds": r[6]}
+                for r in rows]
 
     def close(self) -> None:
         with self._lock:

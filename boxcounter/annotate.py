@@ -15,20 +15,42 @@ _YELLOW = (60, 220, 240)
 _BLUE = (240, 160, 60)
 _RED = (60, 60, 240)
 _WHITE = (240, 240, 240)
+_TEAL = (170, 180, 70)
 
 
 def draw_overlay(frame: np.ndarray,
                  tracks: List[Track],
                  roi_px: Tuple[int, int, int, int],
                  axis: str, line_px: float,
-                 total: int, fps: float, rate_per_min: float) -> np.ndarray:
-    """Return an annotated copy of the frame."""
+                 total: int, fps: float, rate_per_min: float,
+                 packing: Optional[dict] = None) -> np.ndarray:
+    """Return an annotated copy of the frame.
+
+    packing (optional): {"zone_px": (x,y,w,h), "session_bbox": (x,y,w,h)|None,
+    "pieces": int, "elapsed_s": float, "hand_in": bool}
+    """
     out = frame.copy()
     fh, fw = out.shape[:2]
 
     # ROI
     x0, y0, w, h = roi_px
     cv2.rectangle(out, (x0, y0), (x0 + w, y0 + h), _BLUE, 1)
+
+    # Packing zone + active session
+    if packing is not None:
+        zx, zy, zw, zh = packing["zone_px"]
+        cv2.rectangle(out, (zx, zy), (zx + zw, zy + zh), _TEAL, 1)
+        cv2.putText(out, "PACK ZONE", (zx + 4, zy + 14),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, _TEAL, 1, cv2.LINE_AA)
+        if packing.get("session_bbox"):
+            bx, by, bw2, bh2 = packing["session_bbox"]
+            color = _YELLOW if packing.get("hand_in") else _TEAL
+            cv2.rectangle(out, (bx - 2, by - 2), (bx + bw2 + 2, by + bh2 + 2), color, 2)
+            label = f"pcs:{packing.get('pieces', 0)}  {packing.get('elapsed_s', 0):.0f}s"
+            if packing.get("hand_in"):
+                label += "  HAND"
+            cv2.putText(out, label, (bx, min(fh - 6, by + bh2 + 18)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
 
     # Counting line
     lp = int(round(line_px))

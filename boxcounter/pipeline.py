@@ -10,12 +10,16 @@ import time
 from collections import deque
 from typing import Optional
 
+import cv2
+import numpy as np
+
 from .annotate import draw_overlay, mask_to_bgr
 from .camera import FrameSource, create_source
 from .config import AppConfig
 from .counter import LineCounter
 from .detector import BoxDetector
 from .gpio_out import GpioPulse
+from .packing import PackingMonitor
 from .storage import CountStore
 from .tracker import CentroidTracker
 from .webui import SharedState, WebUI
@@ -60,13 +64,16 @@ class Pipeline:
         self.detector = BoxDetector(cfg.processing)
         self.tracker: Optional[CentroidTracker] = None    # built on first frame
         self.counter: Optional[LineCounter] = None        # (needs frame size)
+        self.packing: Optional[PackingMonitor] = None     # (needs frame size)
+        self._pack_history: deque = deque(maxlen=50)      # (pieces, pack_s)
 
         self.store = CountStore(cfg.output.data_dir,
                                 use_sqlite=cfg.output.sqlite,
                                 use_csv=cfg.output.csv)
         self.gpio = GpioPulse(cfg.gpio)
 
-        self.total = self.store.total()      # resume running total on restart
+        self.total = self.store.total()      # resume running totals on restart
+        self.pieces_total = self.store.pieces_total()
         self.session_count = 0
         self._event_times: deque = deque(maxlen=600)   # for boxes/min
         self._reset_requested = False
@@ -106,15 +113,36 @@ class Pipeline:
 
         ccfg = self.cfg.counting
         span = fw if ccfg.axis == "x" else fh
+        # Detections are clipped to the detector's ROI, so the arm-exclusion
+        # bounds must be the ROI's extent along the travel axis (the detector
+        # is initialized before this runs, so roi_px is valid).
+        rx0, ry0, rw, rh = self.detector.roi_px
+        bounds = (rx0, rx0 + rw) if ccfg.axis == "x" else (ry0, ry0 + rh)
         self.counter = LineCounter(
             axis=ccfg.axis,
             line_px=ccfg.line_position * span,
             hysteresis_px=ccfg.hysteresis_frac * span,
             direction=ccfg.direction,
             min_travel_px=ccfg.min_travel_frac * span,
-            min_hits=tcfg.min_hits)
+            min_hits=tcfg.min_hits,
+            bounds_px=bounds)
+        if self.cfg.packing.enabled:
+            self.packing = PackingMonitor(self.cfg.packing, (fh, fw))
+            log.info("Packing monitor on: zone %s px", self.packing.zone_px)
         log.info("Geometry: frame %dx%d, line at %s=%.0f px, hysteresis %.0f px",
                  fw, fh, ccfg.axis, self.counter.line, self.counter.hyst)
+
+    def _media_time(self) -> float:
+        t = self.source.media_time()
+        return t if t is not None else time.monotonic()
+
+    def _reset_scene_state(self) -> None:
+        """Drop state built on a scene that no longer exists (camera restart
+        or background relearn). Counts already taken are unaffected."""
+        if self.tracker is not None:
+            self.tracker.tracks.clear()
+        if self.packing is not None:
+            self.packing.reset()
 
     # -- stats -----------------------------------------------------------
 
@@ -126,13 +154,28 @@ class Pipeline:
         return float(len(self._event_times))
 
     def _stats(self) -> dict:
-        return {
+        s = {
             "total": self.total,
             "session": self.session_count,
             "rate_per_min": self._rate_per_min(),
             "fps": round(self._fps, 1),
             "uptime_s": int(time.monotonic() - self._start_ts),
         }
+        if self.packing is not None:
+            s["packing"] = True
+            s["pieces_total"] = self.pieces_total
+            s["expected_pieces"] = self.cfg.packing.expected_pieces or None
+            hist = [p for p in self._pack_history if p[0] is not None]
+            if hist:
+                last = hist[-1]
+                s["last_pieces"] = last[0]
+                s["last_pack_s"] = last[1]
+                s["avg_pieces"] = round(sum(p[0] for p in hist) / len(hist), 1)
+                times = [p[1] for p in hist if p[1] is not None]
+                if times:
+                    s["avg_pack_s"] = round(sum(times) / len(times), 1)
+            s.update(self.packing.live_stats(self._media_time()))
+        return s
 
     # -- main loop -------------------------------------------------------
 
@@ -167,8 +210,10 @@ class Pipeline:
                             # The restart re-runs auto-exposure and may lock to
                             # a different image; rebuild the background model
                             # and re-warm so stale-model garbage is never
-                            # counted.
+                            # counted, and drop tracker/packing state built on
+                            # the old scene.
                             self.detector.reset()
+                            self._reset_scene_state()
                             frame_idx = 0
                             failures = 0
                         continue
@@ -177,12 +222,31 @@ class Pipeline:
                 frame_idx += 1
 
                 detections, mask = self.detector.process(frame)
+                if self.detector.relearned:
+                    # The background model was rebuilt mid-run (permanent
+                    # scene change): tracks and packing sessions built on the
+                    # old scene are no longer meaningful.
+                    self.detector.relearned = False
+                    self._reset_scene_state()
                 if frame_idx <= cfg.processing.warmup_frames:
                     detections = []   # let the background model settle
 
                 if self.tracker is None:
                     self._init_geometry(frame)
                 tracks = self.tracker.update(detections)
+
+                media_t = self._media_time()
+                if self.packing is not None and frame_idx > cfg.processing.warmup_frames:
+                    # Piece counting must never take down box counting.
+                    try:
+                        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                        fh, fw = frame.shape[:2]
+                        x0, y0, rw, rh = self.detector.roi_px
+                        full_mask = np.zeros((fh, fw), np.uint8)
+                        full_mask[y0:y0 + rh, x0:x0 + rw] = mask
+                        self.packing.update(media_t, gray, full_mask, tracks)
+                    except Exception:
+                        log.exception("Packing monitor failed this frame; continuing")
 
                 events = []
                 if frame_idx > cfg.processing.warmup_frames:
@@ -191,15 +255,34 @@ class Pipeline:
                     self.total += 1
                     self.session_count += 1
                     self._event_times.append(ev.ts)
+                    if self.packing is not None:
+                        try:
+                            session = self.packing.claim_for_track(ev.track_id, media_t)
+                        except Exception:
+                            log.exception("Packing claim failed; box counted without pieces")
+                            session = None
+                        if session is not None:
+                            ev.pieces = session.pieces
+                            ev.pack_seconds = session.pack_seconds
+                            self.pieces_total += session.pieces
+                        self._pack_history.append((ev.pieces, ev.pack_seconds))
                     self.store.record(ev)
                     self.gpio.pulse()
-                    log.info("BOX #%d (track %d, %dx%d px)",
-                             self.total, ev.track_id, ev.bbox[2], ev.bbox[3])
+                    if ev.pieces is not None:
+                        log.info("BOX #%d (track %d, %dx%d px) — %d pieces, "
+                                 "packed in %.1f s",
+                                 self.total, ev.track_id, ev.bbox[2], ev.bbox[3],
+                                 ev.pieces, ev.pack_seconds or 0.0)
+                    else:
+                        log.info("BOX #%d (track %d, %dx%d px)",
+                                 self.total, ev.track_id, ev.bbox[2], ev.bbox[3])
 
                 if self._reset_requested:
                     self._reset_requested = False
                     self.store.reset()
                     self.total = 0
+                    self.pieces_total = 0
+                    self._pack_history.clear()
 
                 # fps (exponential moving average)
                 now = time.monotonic()
@@ -209,14 +292,24 @@ class Pipeline:
                     inst = 1.0 / dt
                     self._fps = inst if self._fps == 0 else 0.9 * self._fps + 0.1 * inst
 
+                pack_overlay = None
+                if self.packing is not None:
+                    ses = self.packing.session
+                    pack_overlay = {
+                        "zone_px": self.packing.zone_px,
+                        "session_bbox": ses.bbox if ses else None,
+                        "pieces": ses.pieces if ses else 0,
+                        "elapsed_s": (media_t - ses.start_t) if ses else 0.0,
+                        "hand_in": self.packing.hand_in if ses else False,
+                    }
                 annotated = draw_overlay(frame, tracks, self.detector.roi_px,
                                          cfg.counting.axis,
                                          self.counter.line if self.counter else 0,
-                                         self.total, self._fps, self._rate_per_min())
+                                         self.total, self._fps, self._rate_per_min(),
+                                         packing=pack_overlay)
                 self.state.update(annotated, mask_to_bgr(mask), self._stats())
 
                 if self.display:
-                    import cv2
                     cv2.imshow("boxcounter", annotated)
                     cv2.imshow("mask", mask)
                     if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -241,7 +334,6 @@ class Pipeline:
             self.store.close()
             self.gpio.close()
             if self.display:
-                import cv2
                 cv2.destroyAllWindows()
 
         summary = {"frames": frame_idx, "total": self.total,

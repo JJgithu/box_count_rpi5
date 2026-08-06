@@ -1,9 +1,12 @@
 # box_count_rpi5
 
-Fully **offline** box counting for a conveyor belt, running on a
+Fully **offline** packing-line monitoring for a conveyor, running on a
 **Raspberry Pi 5 (2 GB)** with an **IMX219 camera** mounted above the belt.
-Counts boxes — open or closed — as they pass a virtual line, with no internet,
-no GPU and no neural network required.
+With no internet, no GPU and no neural network, it counts:
+
+1. **Boxes** — open or closed — as they pass a virtual line,
+2. **Pieces** (pads / sheets) the packer places into each box,
+3. **Pack time** for each box (arrival at the station → departure).
 
 ```
    IMX219 (top view, CSI)
@@ -42,6 +45,13 @@ it, you can swap in a TFLite/NCNN model without touching tracking or counting.
   end-to-end tests reproduce and guard against).
 - **Hysteresis counting**: a box is counted exactly once, only when it crosses
   the line in the travel direction — vibration and bbox jitter can't double-count.
+- **Packing insight without extra sensors**: while a box is parked at the
+  station, arm reaches into it are detected (band around the box + motion
+  inside it) and timed — pieces per box and pack time come from the same
+  camera ([docs/PACKING.md](docs/PACKING.md)).
+- **Arm-proof counting**: the packer's arm sweeping over the belt can never be
+  mistaken for a box (arms stay connected to the frame edge; boxes at the
+  line don't).
 - **Locked exposure**: auto-exposure is frozen after startup so the image
   stays stable for subtraction.
 - **Restart-safe**: totals persist in SQLite; the systemd service auto-restarts.
@@ -80,6 +90,7 @@ python3 -m pytest tests/                     # 38 tests incl. exact-count e2e
 |---|---|
 | [docs/IMPLEMENTATION_GUIDE.md](docs/IMPLEMENTATION_GUIDE.md) | **Start here** — complete step-by-step deployment walkthrough |
 | [docs/RUNNING.md](docs/RUNNING.md) | Day-to-day operation: starting, stopping, logs, reading counts |
+| [docs/PACKING.md](docs/PACKING.md) | Pieces-per-box + pack-time monitoring: concept, layout, tuning |
 | [docs/HARDWARE_SETUP.md](docs/HARDWARE_SETUP.md) | Mounting height/FoV math, lighting, wiring, GPIO to PLC |
 | [docs/CALIBRATION.md](docs/CALIBRATION.md) | Every tunable parameter, with symptom → fix tables |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common problems and their causes |
@@ -92,6 +103,7 @@ boxcounter/          the application package
   detector.py          color background subtraction + open-box fusion
   tracker.py           predictive centroid tracker
   counter.py           directional line counter with hysteresis
+  packing.py           pieces-per-box + pack-time monitor
   pipeline.py          main loop wiring it all together
   storage.py           SQLite + daily CSV persistence
   gpio_out.py          one pulse per box (PLC / stack light)

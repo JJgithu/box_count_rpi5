@@ -27,12 +27,15 @@ and starts counting. You'll see:
 15:04:24 INFO boxcounter.detector: Detector initialized: frame 640x480, ROI (32, 0, 576, 480)
 15:04:24 INFO boxcounter.webui: Web dashboard on http://0.0.0.0:8080/
 15:04:24 INFO boxcounter.pipeline: Pipeline running (resumed total: 0)
-15:04:31 INFO boxcounter.pipeline: BOX #1 (track 3, 142x118 px)
-15:04:33 INFO boxcounter.pipeline: BOX #2 (track 4, 138x121 px)
-15:04:54 INFO boxcounter.pipeline: heartbeat: total=2 rate=5.7/min fps=30.0 tracks=1
+15:04:29 INFO boxcounter.packing:  Packing session started (track 3, bbox (233, 96, 158, 122))
+15:04:33 INFO boxcounter.packing:  Insertion #1 into box (track 3) — visit 14 frames, motion 0.22
+15:04:40 INFO boxcounter.packing:  Packing session ended (departed): track 3, 3 pieces, 11.4 s
+15:04:42 INFO boxcounter.pipeline: BOX #1 (track 3, 142x118 px) — 3 pieces, packed in 11.4 s
+15:04:54 INFO boxcounter.pipeline: heartbeat: total=1 rate=5.7/min fps=30.0 tracks=1
 ```
 
-- **`BOX #n`** — one line every time a box is counted.
+- **`BOX #n`** — one line every time a box is counted (with pieces + pack
+  time when packing monitoring is on — see [PACKING.md](PACKING.md)).
 - **`heartbeat`** — a status line every 30 s, even when nothing passes. If
   heartbeats stop, something is wrong.
 
@@ -131,11 +134,12 @@ sudo systemctl restart boxcounter
 | Where | How |
 |---|---|
 | Dashboard | `http://<pi-ip>:8080` |
-| Just the number | `curl -s http://<pi-ip>:8080/api/stats` |
+| Just the numbers | `curl -s http://<pi-ip>:8080/api/stats` |
 | Reset to zero | click **Reset count** on the dashboard, or `curl -X POST http://<pi-ip>:8080/api/reset` |
 | Today's CSV | `column -s, -t data/events_$(date +%F).csv` |
 | Database | `sqlite3 data/boxcount.db "SELECT COUNT(*) FROM events;"` |
 | Counts per hour | `sqlite3 data/boxcount.db "SELECT substr(iso,1,13) h, COUNT(*) FROM events GROUP BY h;"` |
+| Pieces + pack time per box | `sqlite3 data/boxcount.db "SELECT iso, pieces, pack_seconds FROM events ORDER BY id DESC LIMIT 20;"` |
 
 The running total **survives restarts and reboots** — it resumes from the
 database. "Reset count" starts a new tally without deleting history; the old
