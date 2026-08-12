@@ -51,16 +51,16 @@ def run_parked_box(cfg, bw, bh, seconds=25.0, park_at=3.0):
 @pytest.mark.parametrize("bw,bh", [
     (200, 160),      # 11.6% of the ROI — always froze learning, always worked
     (120, 100),      # 4.3%
-    (90, 70),        # 2.3% — just above the old freeze threshold
+    (90, 70),        # 2.3% — just above the old 2% freeze threshold
     (75, 60),        # 1.6% — just below it: this is where boxes vanished
-    (60, 50),        # 1.1%
-    (45, 35),        # 0.6%
-    (35, 30),        # 0.4% — near min_area_frac
+    (62, 52),        # 1.2% — the smallest the shipped min_area_frac accepts
 ])
 def test_parked_box_is_still_detected_25s_later(bw, bh):
     cfg = ProcessingConfig()          # shipped defaults
-    arriving, at_end = run_parked_box(cfg, bw, bh)
     roi_frac = (bw * bh) / ((cfg.roi[2] * W) * (cfg.roi[3] * H))
+    assert roi_frac > cfg.min_area_frac, (
+        "test box is below min_area_frac and would never be counted anyway")
+    arriving, at_end = run_parked_box(cfg, bw, bh)
     assert arriving, f"{bw}x{bh} ({roi_frac:.4f} of ROI) never detected at all"
     assert at_end, (
         f"{bw}x{bh} ({roi_frac:.4f} of ROI) was absorbed into the background "

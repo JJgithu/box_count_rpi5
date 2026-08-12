@@ -64,13 +64,20 @@ processing:
   dilate_kernel: 0            # extra growth of blobs (usually 0)
 
   # --- blob filtering ---
-  # Accepted box size, as a fraction of the ROI area. Deliberately wide so a
-  # mixed line of small and large boxes is all counted.
-  #   0.003 of a 576x480 ROI is about 29x29 px  (a small box)
-  #   0.80  of the same ROI is about 470x470 px (a box nearly filling the view)
-  # Raise min_area_frac if belt debris gets counted; lower max_area_frac if a
-  # lighting change or two touching boxes register as one giant box.
-  min_area_frac: 0.003        # smallest accepted blob (fraction of ROI area)
+  # Accepted box size, as a fraction of the ROI area.
+  #
+  # min_area_frac is THE setting most likely to cause miscounts. Too high and
+  # real boxes are ignored; too low and belt debris, shadows and the packer's
+  # arm get counted as boxes. Do not guess it — measure your actual boxes:
+  #     python3 tools/wizard.py --geometry
+  # For scale, on a 576x480 ROI:
+  #     0.003 = about  29x29 px   (usually too permissive: counts debris)
+  #     0.01  = about  53x53 px   (a sensible starting point)
+  #     0.02  = about  74x74 px
+  # max_area_frac is generous on purpose: accepting an over-large blob is far
+  # less harmful than rejecting a real box. Lower it if a lighting change or
+  # two touching boxes register as one giant box.
+  min_area_frac: 0.01         # smallest accepted blob (fraction of ROI area)
   max_area_frac: 0.80         # largest accepted blob
   merge_gap_px: 24            # blobs closer than this merge into one box
   warmup_frames: 60           # ignore detections while the model settles

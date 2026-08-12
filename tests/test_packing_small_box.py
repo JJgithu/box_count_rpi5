@@ -49,7 +49,7 @@ def run(video: str, data_dir: str) -> list:
     return [r[0] for r in rows]
 
 
-@pytest.mark.parametrize("box", [(60, 50), (90, 75)])
+@pytest.mark.parametrize("box", [(72, 60), (95, 80)])
 def test_small_box_counts_every_pad(tmp_path, box):
     """A small box must not be lost partway through packing."""
     video = str(tmp_path / f"small_{box[0]}.mp4")
@@ -65,7 +65,7 @@ def test_slow_packer_resting_a_hand_in_a_small_box(tmp_path):
     that used to record one pad (or none) and then lose the box entirely."""
     video = str(tmp_path / "resting.mp4")
     generate_packing_video(video, pieces_per_box=(4,), seed=5,
-                           box_w=(60, 61), box_h=(50, 51),
+                           box_w=(72, 73), box_h=(60, 61),
                            gap_s=0.5, hold_s=5.5)
     assert run(video, str(tmp_path / "d")) == [4], (
         "pads were lost while the packer rested a hand in the box")
@@ -76,7 +76,7 @@ def test_long_pause_between_pads_on_a_small_box(tmp_path):
     which a stationary small box used to be absorbed into the background."""
     video = str(tmp_path / "paused.mp4")
     generate_packing_video(video, pieces_per_box=(3,), seed=9,
-                           box_w=(55, 56), box_h=(45, 46),
+                           box_w=(70, 71), box_h=(58, 59),
                            gap_s=4.0, hold_s=0.5)
     assert run(video, str(tmp_path / "d")) == [3], (
         "the box was lost during the pause between pads")

@@ -75,11 +75,19 @@ class ProcessingConfig:
     open_kernel: int = 5              # morphological open: removes speckle
     close_kernel: int = 31            # morphological close: fuses open-box rims
     dilate_kernel: int = 0            # extra dilation, 0 = off
-    # Accepted blob area, as a fraction of the ROI area. Wide by default so
-    # a mixed line of small and large boxes is all counted; narrow them if
-    # debris gets counted (raise min) or a lighting change registers as a
-    # giant box (lower max).
-    min_area_frac: float = 0.003
+    # Accepted blob area, as a fraction of the ROI area.
+    #
+    # min_area_frac is the setting most likely to cause miscounts, in both
+    # directions, and the right value depends entirely on how big your boxes
+    # look to the camera — measure it (tools/wizard.py --geometry) rather
+    # than guessing. Too high and real boxes are ignored; too low and belt
+    # debris, shadows and the packer's arm are counted as boxes, which also
+    # holds the background model frozen and makes everything worse.
+    # 0.01 of the ROI is roughly a 53x53 px blob at 640x480.
+    min_area_frac: float = 0.01
+    # Generous, since accepting an over-large blob is far less harmful than
+    # rejecting a real box; lower it if a lighting change or two touching
+    # boxes register as one giant box.
     max_area_frac: float = 0.80
     merge_gap_px: int = 24            # merge blobs closer than this gap
     warmup_frames: int = 60           # ignore detections while model settles
@@ -230,6 +238,17 @@ def _validate(cfg: AppConfig) -> None:
         errors.append(f"processing.method must be mog2|static, got '{cfg.processing.method}'")
     if not (0.0 < cfg.processing.min_area_frac < cfg.processing.max_area_frac <= 1.0):
         errors.append("processing: need 0 < min_area_frac < max_area_frac <= 1")
+    elif cfg.processing.min_area_frac < 0.005:
+        # Low enough that belt debris, shadows and parts of the packer's arm
+        # start qualifying as boxes — which both inflates the count and holds
+        # the background model frozen, making everything downstream worse.
+        log.warning(
+            "processing.min_area_frac is %.4f — that accepts blobs covering "
+            "only %.2f%% of the region of interest, small enough that debris "
+            "and shadows may be counted as boxes. Measure your real boxes "
+            "with 'python3 tools/wizard.py --geometry' if the count looks "
+            "wrong.",
+            cfg.processing.min_area_frac, cfg.processing.min_area_frac * 100)
 
     if cfg.counting.axis not in ("x", "y"):
         errors.append(f"counting.axis must be x|y, got '{cfg.counting.axis}'")
