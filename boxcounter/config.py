@@ -75,8 +75,12 @@ class ProcessingConfig:
     open_kernel: int = 5              # morphological open: removes speckle
     close_kernel: int = 31            # morphological close: fuses open-box rims
     dilate_kernel: int = 0            # extra dilation, 0 = off
-    min_area_frac: float = 0.01       # blob area as fraction of ROI area
-    max_area_frac: float = 0.60
+    # Accepted blob area, as a fraction of the ROI area. Wide by default so
+    # a mixed line of small and large boxes is all counted; narrow them if
+    # debris gets counted (raise min) or a lighting change registers as a
+    # giant box (lower max).
+    min_area_frac: float = 0.003
+    max_area_frac: float = 0.80
     merge_gap_px: int = 24            # merge blobs closer than this gap
     warmup_frames: int = 60           # ignore detections while model settles
 

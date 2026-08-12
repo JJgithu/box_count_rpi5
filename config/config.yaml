@@ -64,8 +64,14 @@ processing:
   dilate_kernel: 0            # extra growth of blobs (usually 0)
 
   # --- blob filtering ---
-  min_area_frac: 0.01         # smallest accepted blob (fraction of ROI area)
-  max_area_frac: 0.60         # largest accepted blob
+  # Accepted box size, as a fraction of the ROI area. Deliberately wide so a
+  # mixed line of small and large boxes is all counted.
+  #   0.003 of a 576x480 ROI is about 29x29 px  (a small box)
+  #   0.80  of the same ROI is about 470x470 px (a box nearly filling the view)
+  # Raise min_area_frac if belt debris gets counted; lower max_area_frac if a
+  # lighting change or two touching boxes register as one giant box.
+  min_area_frac: 0.003        # smallest accepted blob (fraction of ROI area)
+  max_area_frac: 0.80         # largest accepted blob
   merge_gap_px: 24            # blobs closer than this merge into one box
   warmup_frames: 60           # ignore detections while the model settles
 
