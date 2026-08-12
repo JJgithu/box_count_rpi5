@@ -1,22 +1,38 @@
 #!/usr/bin/env bash
 # Install the box counter on Raspberry Pi OS (Bookworm or newer), Pi 5.
-# Run from the repository root:   bash scripts/install.sh
+#
+#   bash scripts/install.sh                 packages + service
+#   bash scripts/install.sh --service-only  just the systemd service
+#                                           (when the packages are already in)
 set -euo pipefail
 
 APPDIR="$(cd "$(dirname "$0")/.." && pwd)"
-RUN_USER="${SUDO_USER:-$USER}"
+# $USER is not set in every non-interactive shell, and `set -u` would abort.
+RUN_USER="${SUDO_USER:-${USER:-$(id -un)}}"
+SERVICE_ONLY=0
+for arg in "$@"; do
+    case "$arg" in
+        --service-only) SERVICE_ONLY=1 ;;
+        -h|--help) sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "Unknown option: $arg" >&2; exit 2 ;;
+    esac
+done
 
-echo "==> Installing system packages (all from Raspberry Pi OS repos, offline-friendly)"
-sudo apt-get update
-sudo apt-get install -y \
-    python3-picamera2 \
-    python3-opencv \
-    python3-numpy \
-    python3-yaml \
-    python3-flask \
-    python3-gpiozero \
-    python3-lgpio \
-    rpicam-apps
+if [ "$SERVICE_ONLY" -eq 0 ]; then
+    echo "==> Installing system packages (all from Raspberry Pi OS repos, offline-friendly)"
+    sudo apt-get update
+    sudo apt-get install -y \
+        python3-picamera2 \
+        python3-opencv \
+        python3-numpy \
+        python3-yaml \
+        python3-flask \
+        python3-gpiozero \
+        python3-lgpio \
+        rpicam-apps
+else
+    echo "==> Skipping apt (--service-only)"
+fi
 
 echo "==> Verifying every Python dependency imports"
 MISSING=""
@@ -55,10 +71,15 @@ echo "==> Installing systemd service (boxcounter.service)"
 sed -e "s|__USER__|$RUN_USER|g" -e "s|__APPDIR__|$APPDIR|g" \
     "$APPDIR/systemd/boxcounter.service" | sudo tee /etc/systemd/system/boxcounter.service >/dev/null
 sudo systemctl daemon-reload
+if systemctl list-unit-files boxcounter.service >/dev/null 2>&1; then
+    echo "    service installed (not started yet)"
+else
+    echo "    WARNING: the service does not appear in systemctl"
+fi
 
 echo
 echo "Done. Next steps:"
-echo "  1. Calibrate:      python3 tools/calibrate.py          (see docs/CALIBRATION.md)"
-echo "  2. Test run:       python3 -m boxcounter --config config/config.yaml"
+echo "  1. Calibrate:      python3 tools/wizard.py             (see docs/CALIBRATION.md)"
+echo "  2. Test run:       python3 -m boxcounter"
 echo "     Dashboard:      http://$(hostname -I 2>/dev/null | awk '{print $1}'):8080/"
 echo "  3. Enable service: sudo systemctl enable --now boxcounter"

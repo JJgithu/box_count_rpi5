@@ -89,6 +89,76 @@ def _check_optional_deps(cfg, args) -> int:
     return 0
 
 
+def _live_reset(port: int) -> bool:
+    """Ask a running counter to reset, so its on-screen total updates now.
+
+    Returns True if a running instance handled it. Resetting the database
+    underneath a running counter would leave its in-memory total stale, so
+    the running instance is always given first refusal.
+    """
+    import urllib.error
+    import urllib.request
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/reset", method="POST")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            return resp.status == 200
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+def _reset_count(cfg) -> int:
+    from .storage import CountStore
+
+    if _live_reset(cfg.web.port):
+        print("Count reset. The running counter picked it up immediately.")
+        print("History is kept — the database and CSV files are untouched.")
+        return 0
+
+    store = CountStore(cfg.output.data_dir, use_sqlite=cfg.output.sqlite,
+                       use_csv=False)
+    try:
+        before = store.total()
+        store.reset()
+    finally:
+        store.close()
+    print(f"Count reset: {before} -> 0")
+    print("History is kept — the database and CSV files are untouched.")
+    print("\nIf the counter is running right now, restart it so its screen")
+    print("catches up:  sudo systemctl restart boxcounter")
+    return 0
+
+
+def _print_totals(cfg) -> int:
+    from .storage import CountStore
+
+    store = CountStore(cfg.output.data_dir, use_sqlite=cfg.output.sqlite,
+                       use_csv=False)
+    try:
+        s = store.summary()
+        recent = store.recent(5)
+    finally:
+        store.close()
+    print(f"Boxes counted        : {s['total']}")
+    if cfg.packing.enabled:
+        print(f"Pads counted (total) : {s['pieces_total']}")
+        avg_p = s["avg_pieces"]
+        avg_t = s["avg_pack_seconds"]
+        print(f"Average pads per box : "
+              f"{avg_p:.1f}" if avg_p is not None else
+              "Average pads per box : --")
+        print(f"Average pack time    : "
+              f"{avg_t:.1f} s" if avg_t is not None else
+              "Average pack time    : --")
+    if recent:
+        print("\nMost recent boxes:")
+        for r in recent:
+            pads = "--" if r["pieces"] is None else f"{r['pieces']} pads"
+            secs = "--" if r["pack_seconds"] is None else f"{r['pack_seconds']:.1f} s"
+            print(f"  {r['time'].replace('T', ' ')}   {pads:>8}   {secs:>8}")
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="boxcounter",
@@ -108,6 +178,11 @@ def main(argv=None) -> int:
                         help="verify dependencies and config, then exit")
     parser.add_argument("--no-status", action="store_true",
                         help="plain log lines instead of the live status panel")
+    parser.add_argument("--reset", action="store_true",
+                        help="set the running total back to zero, then exit "
+                             "(history is kept in the database and CSVs)")
+    parser.add_argument("--total", action="store_true",
+                        help="print the current totals, then exit")
     args = parser.parse_args(argv)
 
     rc = _check_core_deps()
@@ -121,6 +196,11 @@ def main(argv=None) -> int:
 
     from .config import load_config          # needs yaml, checked above
     cfg = load_config(cfg_path)
+
+    if args.reset:
+        return _reset_count(cfg)
+    if args.total:
+        return _print_totals(cfg)
 
     rc = _check_optional_deps(cfg, args)
     if rc:

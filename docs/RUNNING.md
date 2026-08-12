@@ -106,6 +106,15 @@ Set it up once:
 sudo systemctl enable --now boxcounter
 ```
 
+> **"Unit boxcounter.service not found"** means the service was never
+> installed — `scripts/install.sh` did not get as far as that step (usually
+> because the packages were installed by hand instead). Install just the
+> service, without touching apt:
+>
+> ```bash
+> bash scripts/install.sh --service-only
+> ```
+
 `enable` = start at every boot. `--now` = also start it right now. That's it —
 it will keep running across reboots, crashes, and camera glitches.
 
@@ -211,11 +220,48 @@ Fastest / slowest    : 8.2 s / 26.7 s
 
 ### Everything else
 
+### Resetting the count
+
+```bash
+python3 -m boxcounter --reset
+```
+
+Works whether or not the counter is running: if it is, the running instance
+picks the reset up immediately; if it isn't, the stored total is zeroed.
+
+```
+Count reset: 412 -> 0
+History is kept — the database and CSV files are untouched.
+```
+
+**A reset only restarts the running total.** Every box already counted stays
+in the database and the CSVs, so yesterday's numbers are never lost.
+
+To see the totals without starting the camera:
+
+```bash
+python3 -m boxcounter --total
+```
+
+```
+Boxes counted        : 412
+Pads counted (total) : 1236
+Average pads per box : 3.0
+Average pack time    : 11.4 s
+
+Most recent boxes:
+  2026-08-12 15:31:04    4 pads     5.7 s
+```
+
+You can also press **Reset count** on the dashboard, or
+`curl -X POST http://<pi-ip>:8080/api/reset`.
+
+### Everything else
+
 | Where | How |
 |---|---|
 | Dashboard | `http://<pi-ip>:8080` |
 | Just the numbers | `curl -s http://<pi-ip>:8080/api/stats` |
-| Reset to zero | click **Reset count** on the dashboard, or `curl -X POST http://<pi-ip>:8080/api/reset` |
 | Database | `sqlite3 data/boxcount.db "SELECT COUNT(*) FROM events;"` |
 | Counts per hour | `sqlite3 data/boxcount.db "SELECT substr(iso,1,13) h, COUNT(*) FROM events GROUP BY h;"` |
 | Pads + pack time per box | `sqlite3 data/boxcount.db "SELECT iso, pieces, pack_seconds FROM events ORDER BY id DESC LIMIT 20;"` |

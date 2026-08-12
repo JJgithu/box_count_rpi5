@@ -181,7 +181,8 @@ class StatusDisplay:
 
         if self.csv_path:
             line(f" {_DIM}CSV: {self.csv_path}{_RESET}")
-        line(f" {_DIM}Ctrl-C to stop{_RESET}")
+        line(f" {_DIM}Ctrl-C to stop     reset the total: "
+             f"python3 -m boxcounter --reset{_RESET}")
         out.append(f"{_CSI}J")     # clear anything below
 
         self.stream.write("".join(out))
