@@ -18,6 +18,28 @@ sudo apt-get install -y \
     python3-lgpio \
     rpicam-apps
 
+echo "==> Verifying every Python dependency imports"
+MISSING=""
+for m in cv2 numpy yaml flask picamera2 gpiozero; do
+    if python3 -c "import $m" >/dev/null 2>&1; then
+        echo "    OK      $m"
+    else
+        echo "    MISSING $m"
+        MISSING="$MISSING $m"
+    fi
+done
+if [ -n "$MISSING" ]; then
+    echo
+    echo "ERROR: these modules still do not import:$MISSING"
+    echo "The apt install did not fully succeed. Common causes:"
+    echo "  - stale package index      -> sudo apt-get update, then re-run"
+    echo "  - no network/DNS for apt   -> check: ping -c1 deb.debian.org"
+    echo "  - full SD card             -> check: df -h /"
+    echo "  - running inside a venv    -> deactivate, or recreate it with"
+    echo "                                python3 -m venv --system-site-packages"
+    exit 1
+fi
+
 echo "==> Creating data directory"
 mkdir -p "$APPDIR/data"
 
