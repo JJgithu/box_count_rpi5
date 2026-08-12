@@ -1,232 +1,290 @@
-# Calibration — Step by Step
+# Calibration — Hyper-Detailed, Step by Step
 
-Follow these steps **in order**. Each one depends on the previous being right,
-and most "it counts wrong" problems are really an earlier step being skipped.
+This is the procedure for taking a freshly installed system that counts
+nothing and turning it into one that counts every box, every pad, and every
+pack time correctly.
 
-Everything you change lives in one file, `config/config.yaml`. After every
-change:
-
-```bash
-sudo systemctl restart boxcounter      # if running as a service
-```
-
-**Golden rule: the mask is the truth.** Open `http://<pi-ip>:8080` and click
-**show mask**. A correctly calibrated system shows **solid white boxes on a
-pure black belt** — nothing else. If the mask is right, counting is almost
-always right. Keep that page open throughout.
-
-Budget about 45 minutes the first time. Steps 1–6 give you box counting;
-steps 7–10 add piece counting and pack times.
+**You do not need a browser, a second computer, or to copy files anywhere.**
+Everything is done from the Pi's terminal.
 
 ---
 
-# Part A — Box counting
+## Before you start
 
-## Step 1. Get a stable, well-exposed image
+Read this box once — it explains the two ideas everything else rests on.
 
-Everything downstream compares each frame against a learned picture of the
-empty belt, so the image must not flicker, drift, or blur.
+> **1. The system compares each frame against a picture of the empty belt.**
+> Anything different is "foreground". Boxes are foreground; the belt is not.
+> If the image wobbles or the light flickers, everything looks like
+> foreground and nothing works.
+>
+> **2. Four geometry numbers decide everything**, all written as *fractions*
+> of the picture (0.0 = left/top edge, 1.0 = right/bottom edge):
+>
+> | Setting | Meaning |
+> |---|---|
+> | `processing.roi` | the part of the image that is belt. Everything outside is ignored. |
+> | `counting.line_position` | boxes are counted when they cross this line |
+> | `counting.direction` | which way boxes travel across it |
+> | `packing.zone` | where boxes stop to be filled |
 
-Stop the service and look at a frame:
+What you need:
+
+- the belt running,
+- at least 10 boxes you can send through,
+- someone to pack them the normal way (for pads and times),
+- about 30 minutes.
+
+Stop the service so it doesn't fight you for the camera:
 
 ```bash
 sudo systemctl stop boxcounter
 cd ~/box_count_rpi5
-python3 tools/calibrate.py
 ```
-
-Copy `data/calibration_snapshot.jpg` to your PC and look at it:
-
-```bash
-# run this ON YOUR PC
-scp <pi-user>@boxcounter.local:box_count_rpi5/data/calibration_snapshot.jpg .
-```
-
-Check, in this order:
-
-| Check | If wrong |
-|---|---|
-| **Whole belt width visible**, small margin each side | move the camera up/down (≈1.21 × height across) |
-| **At least 2 box-lengths** of belt visible along travel | raise the camera |
-| Image **sharp**, boxes not smeared | see motion blur below |
-| Exposure sensible — belt not blown white or crushed black | see below |
-| Camera **rigid**, no vibration | fix the mount before anything else |
-
-**Motion blur** (boxes smeared along travel): set a manual exposure —
-`camera.exposure_time_us: 4000` and raise `camera.analogue_gain` (e.g. `4.0`)
-to compensate for the darker image. Shorter exposure = less blur.
-
-**Flicker or brightness pumping:** keep `camera.lock_exposure: true` (the
-default). Never use PWM-dimmed LED lighting.
-
-> Do not continue until the image is stable and sharp. Every later step
-> inherits these problems.
-
-## Step 2. Set the region of interest (ROI)
-
-The ROI is the only part of the image the detector looks at. It must cover
-**belt surface only** — no rails, no rollers, no floor, no walkway where
-people pass.
-
-Read the fractions off the grid in your snapshot (labelled 0.1 … 0.9), then:
-
-```yaml
-processing:
-  roi: [0.05, 0.0, 0.90, 1.0]     # [x, y, width, height] as fractions
-```
-
-Re-run `python3 tools/calibrate.py` and check the **blue** rectangle sits on
-belt only. Repeat until it does.
-
-## Step 3. Make boxes appear cleanly in the mask
-
-Start the counter in the foreground and watch the mask:
-
-```bash
-python3 -m boxcounter
-# browser -> http://<pi-ip>:8080 -> "show mask"
-```
-
-Run boxes past and compare what you see to this table:
-
-| Mask shows | Meaning | Fix |
-|---|---|---|
-| Solid white boxes, black belt | correct | continue to step 4 |
-| Box **split into pieces** (open box: only a rim) | interior looks like belt | raise `close_kernel` 31 → 41 → 51; raise `merge_gap_px` 24 → 40 |
-| Box faint, patchy, or invisible | too little contrast | lower `mog2_var_threshold` 32 → 20; confirm `use_color: true`; add light |
-| Speckles all over | sensor noise / flicker | raise `blur_kernel` 5 → 7, `open_kernel` 5 → 9, `mog2_var_threshold` |
-| A grey/white shadow trailing each box | shadows | keep `detect_shadows: true`; make the lighting more diffuse |
-| Belt edges or rollers white | ROI too big | back to step 2 |
-| Boxes **fade out** after running a while | background absorbed the traffic | confirm `freeze_learning_fg_fraction: 0.02`; or switch to `method: static` (below) |
-| Whole frame flashes white | exposure hunting | `lock_exposure: true`, or set manual exposure (step 1) |
-
-**Rule of thumb:** `close_kernel` ≈ ¼ of a box's width **in pixels**. A
-160 px-wide box → about 40.
-
-**If your lighting is constant** (indoor, artificial), the `static` method is
-more stable — it compares against a fixed photo of the empty belt and can
-never "absorb" a box:
-
-```bash
-# belt RUNNING and EMPTY:
-python3 tools/capture_background.py
-# then in config.yaml:  processing.method: static
-```
-
-## Step 4. Set the accepted box sizes
-
-With boxes flowing, measure what the detector actually sees:
-
-```bash
-python3 tools/calibrate.py --check --seconds 30
-```
-
-It prints something like:
-
-```
-Blob area (fraction of ROI): p10=0.071  median=0.084  p90=0.096
-Suggested config:  min_area_frac: 0.035   max_area_frac: 0.240
-```
-
-Copy those two suggested values into `config.yaml`. They reject
-noise specks (too small) and lighting-change blobs (too big).
-
-If it reports **"No blobs detected"**, go back to step 3 — the mask is wrong.
-
-## Step 5. Place the counting line
-
-```yaml
-counting:
-  axis: y              # y = boxes travel vertically in the image
-  line_position: 0.78  # fraction of the frame
-  direction: positive  # positive = down/right in the IMAGE
-```
-
-Rules:
-- Put the line where boxes are **fully visible and moving steadily**.
-- Keep it **at least half a box-length** from the frame edge.
-- If you're using the packing station (Part B), the line must be **after**
-  the packing zone — pack first, count after.
-- Boxes travelling **up** the image → `direction: negative`. Travelling
-  **horizontally** → `axis: x`.
-
-Check the **yellow** line in a fresh `python3 tools/calibrate.py` snapshot.
-
-## Step 6. Verify box counting before going further
-
-Run a known batch — at least 20 boxes at production speed and spacing, mixed
-open and closed — and compare with the dashboard.
-
-| Symptom | Fix |
-|---|---|
-| Nothing counted at all | `direction` is reversed — flip it |
-| Two boxes counted as one | lower `merge_gap_px` / `close_kernel`; boxes that physically touch cannot be separated |
-| One box counted twice | raise `tracking.max_disappeared` 30 → 45; raise `max_distance_frac` 0.15 → 0.25 |
-| Boxes missed on a fast belt | raise `camera.fps`; raise `max_distance_frac`; lower `min_hits` to 2 |
-| Counts with an empty belt | raise `min_area_frac`; raise `counting.min_travel_frac` |
-
-**Do not move on until this is accurate.** Piece counting builds directly on
-box tracking.
 
 ---
 
-# Part B — Piece counting and pack time
+# STEP 1 — Find out what is actually wrong
 
-Skip this entire part if you only need box counts (`packing.enabled: false`).
-
-## Step 7. Set the packing zone
-
-The zone is where boxes **stop to be filled**.
-
-```yaml
-packing:
-  enabled: true
-  zone: [0.05, 0.05, 0.90, 0.45]   # [x, y, w, h] fractions
-```
-
-Requirements:
-- Covers the spot where a box **comes to rest**, with a little margin.
-- Sits **inside** `processing.roi` (the detector is blind outside it) — the
-  config warns you at startup if it isn't.
-- Ends **before** `counting.line_position`.
-- Leaves room around the parked box: the watch band extends `ring_px`
-  (default 28 px) beyond the box on every side.
-
-Verify with a snapshot — the zone is drawn in **teal**:
+Do this first, always. It runs the real detection chain and tells you the
+exact stage where things break.
 
 ```bash
-python3 tools/calibrate.py
+python3 tools/wizard.py --diagnose --seconds 45
 ```
 
-## Step 8. Check the geometry on a real box
+**While it runs (45 seconds), send 2–3 boxes down the belt and pack one
+normally.** It needs to see real activity.
 
-With the belt running and a box being packed:
+You will get a funnel like this:
+
+```
+Stage-by-stage funnel
+  frames captured                  1350  ##############################
+  frames with ANY foreground        980  ##############################
+  frames with blobs (any size)      980  ##############################
+  frames with ACCEPTED boxes          0
+  tracks created                      0
+  tracks that crossed the line        0
+  BOXES COUNTED                       0
+```
+
+**Read it top to bottom and find the first row that drops to zero.** That is
+your problem. The tool then names it and tells you the setting to change:
+
+```
+Verdict
+  PROBLEM Blobs are found but ALL are rejected by the size filter.
+     Observed blob area (fraction of ROI): median=0.0001  largest(p98)=0.2228
+     Configured accept range: 0.5 .. 0.6
+     -> even your BIGGEST blob is smaller than min_area_frac.
+        Set processing.min_area_frac: 0.0891
+```
+
+### What each verdict means
+
+| Verdict | What is happening | What to do |
+|---|---|---|
+| **No frames from the camera** | camera not working | `rpicam-hello --list-cameras` — see [TROUBLESHOOTING](TROUBLESHOOTING.md) |
+| **Sees NOTHING moving** | every frame looks like empty belt | nothing passed during the test, or the ROI points at the wrong place, or contrast is too low. Go to **Step 2** |
+| **Foreground but no blobs** | the noise filter is erasing your boxes | set `processing.open_kernel: 3` |
+| **All blobs rejected by size** | boxes are bigger/smaller than the accepted range | **Step 3** fixes this automatically |
+| **None crossed the line** | the counting line is not in the boxes' path | **Step 3** fixes this automatically |
+| **Crossed but not counted** | usually the direction is backwards | **Step 3** fixes this automatically |
+| **Counting works** | box counting is good | go to **Step 5** |
+
+Keep this command in mind — **you re-run it after every change.**
+
+---
+
+# STEP 2 — See what the camera sees, and set the ROI
+
+This is the only step the wizard cannot do for you: only you know which part
+of the picture is belt and which is machinery.
+
+```bash
+python3 tools/wizard.py --live --seconds 60
+```
+
+You get a live picture drawn with characters:
+
+```
+--------------------------------------------------------
+|                                                      |
+|              ....::::::::....                        |
+|            .:@@@@@@@@@@@@@@:.                        |
+|            :@@@@@@@@@@@@@@@@:                        |
+|            -|@@@@@@@@@@@@@@|-                        |
+|            .:@@@@@@@@@@@@@@:.                        |
+|                                                      |
+========================================================
+|                                                      |
+--------------------------------------------------------
+legend: ' '=belt  .:#@=foreground  |-|=detected box
+        ===counting line  :.:=packing zone  ---=ROI
+```
+
+- **space** = belt, nothing detected. This is what an empty belt should look
+  like: almost entirely blank.
+- **`.` `:` `#` `@`** = foreground. A box should be a solid `@` shape.
+- **`|` `-` in green** = a box the system **accepted**. This is the goal.
+- **`---` blue border** = the current ROI.
+- **`===` amber** = the counting line.
+
+### What you are checking
+
+**A. Is the empty belt blank?**
+If the screen is full of `.` and `:` with no boxes passing, the detector is
+seeing noise or machinery.
+
+- Noise everywhere → raise `processing.blur_kernel` to 7 and
+  `processing.open_kernel` to 7.
+- A busy region in one place (a roller, a person's walkway, a hanging cable)
+  → exclude it with the ROI, below.
+
+**B. Do boxes appear as solid `@` shapes?**
+If a box appears as a hollow ring (an open box, where the inside looks like
+the belt), raise `processing.close_kernel` from 31 to 41, then 51.
+
+If boxes barely appear at all, lower `processing.mog2_var_threshold` from 32
+to 20, then 16.
+
+**C. Does the ROI (blue border) cover belt only?**
+
+Read the position off the screen. The view is the whole camera image, so:
+
+- the **left edge** of the picture is x = 0.0, the **right edge** is x = 1.0
+- the **top** is y = 0.0, the **bottom** is y = 1.0
+- something a quarter of the way across is x ≈ 0.25
+
+Then edit the config:
+
+```bash
+nano config/config.yaml
+```
+
+Find the `processing:` section and set:
+
+```yaml
+  roi: [0.05, 0.0, 0.90, 1.0]
+```
+
+That reads: start 5% in from the left, 0% from the top, and cover 90% of the
+width and 100% of the height. **Save with Ctrl-O, Enter, then exit with
+Ctrl-X.**
+
+Re-run `python3 tools/wizard.py --live` and check the blue border now sits on
+belt only.
+
+> **Rule:** it is better to make the ROI too small than too big. A box only
+> needs to be *mostly* inside it.
+
+---
+
+# STEP 3 — Let the wizard learn your line
+
+Now the wizard watches real boxes and works out the numbers itself.
+
+```bash
+python3 tools/wizard.py --geometry --seconds 60
+```
+
+**Run at least 3 complete cycles while it watches:** a box arrives, stops,
+gets packed, and leaves. The more complete cycles, the better.
+
+It reports what it saw and proposes settings:
+
+```
+What was observed
+  boxes travelled x=0.38..0.50  y=0.07..0.94
+  travel direction along y: positive
+  box area p10=0.0602 p90=0.2176 (fraction of ROI)
+  boxes stopped around x=0.45 y=0.33 (236 samples)
+
+Proposed configuration
+  processing.min_area_frac: 0.0301
+  processing.max_area_frac: 0.544
+  counting.direction: positive
+  counting.line_position: 0.62
+  packing.zone: [0.29, 0.2, 0.31, 0.38]
+
+Write these into config/config.yaml? [y/N]
+```
+
+Type **`y`** and press Enter.
+
+**Your old config is backed up automatically** to
+`config/config.backup-YYYYMMDD-HHMMSS.yaml`, and comments are preserved. To
+undo, copy the backup back over `config/config.yaml`.
+
+### Things that can go wrong here
+
+| Message | Meaning | Fix |
+|---|---|---|
+| "The biggest moving thing was only 0.05% of the region of interest — that is noise" | no box passed while it was measuring, or the ROI is off the belt | send boxes past **during** the test; check **Step 2** |
+| "Only 8 box sightings — too little to calibrate from" | not enough evidence | run more boxes, or add `--seconds 90` |
+| "current size limits reject every blob, so geometry was inferred from raw detections" | normal when starting from a bad config — it repairs detection, then automatically watches again | nothing, let it run |
+| "no stopping point seen" | no box ever stopped, so no packing zone could be set | if boxes *do* stop, raise `packing.dwell_speed_px` to 3.0 and repeat |
+| "The values worked out here do not form a valid configuration" | it refused to write something the counter could not load | run more boxes past and retry with `--seconds 90` |
+| "Detection is still not accepting boxes after this change" | something more basic is wrong, almost always the ROI | go back to **Step 2** |
+
+> **Your belt may run left-to-right** rather than top-to-bottom in the
+> picture. The wizard detects this and sets `counting.axis` for you. If you
+> ever see boxes tracked but never counted, `--diagnose` will tell you the
+> axis is wrong.
+
+**To undo anything the wizard wrote**, use the backup it prints:
+
+```bash
+cp config/config.backup-20260812-155737.yaml config/config.yaml
+```
+
+---
+
+# STEP 4 — Confirm box counting works
+
+```bash
+python3 tools/wizard.py --diagnose --seconds 45
+```
+
+Send boxes through again. You want:
+
+```
+  BOXES COUNTED                      3  ###
+
+Verdict
+  OK    Counting works: 3 boxes counted in this test.
+
+Packing station
+  Boxes stopped around x=0.45 y=0.33 (fractions of the frame).
+  OK    209/236 stopped samples are inside packing.zone.
+```
+
+**Count the boxes yourself and compare.** If the number is wrong:
+
+| Problem | Fix |
+|---|---|
+| Two touching boxes counted as one | lower `processing.merge_gap_px` to 12 and `close_kernel` to 21. Boxes that physically touch cannot be separated |
+| One box counted twice | raise `tracking.max_disappeared` to 45 |
+| Boxes missed on a fast belt | raise `camera.fps` to 40; lower `tracking.min_hits` to 2 |
+| Counts with an empty belt | raise `processing.min_area_frac` |
+
+**Do not go further until box counting is right.** Pad counting is built on
+top of box tracking.
+
+---
+
+# STEP 5 — Tune pad counting
+
+This is the sensitive part, and the defaults will almost certainly need
+adjusting for your station.
 
 ```bash
 python3 tools/calibrate.py --packing --seconds 60
 ```
 
-The moment a box parks, it saves `data/packing_snapshot.jpg` showing the
-actual geometry. Copy it to your PC and check:
-
-- **teal** = the box the system locked onto (should match the real box),
-- **yellow** = the watch band where arms are detected (should be clear belt,
-  *not* overlapping the next queued box),
-- **blue** = the interior it watches for pads landing (should cover where
-  pads actually land).
-
-If the yellow band overlaps the queued box, either leave a bigger physical
-gap between the packing spot and the queue, or reduce `ring_px`.
-
-If **no session ever starts**, the box must be: fully inside the frame,
-inside the zone, *seen arriving* (`min_arrival_px: 30`), and actually
-**stopped** (`dwell_speed_px: 1.5`). If your boxes creep while being packed,
-raise `dwell_speed_px` to 3–4.
-
-## Step 9. Tune the arm detection
-
-Keep that same command running and **reach into the box as the packer does**,
-several times. You get a live readout:
+When a box parks, it saves a picture of the geometry and then shows a live
+readout. **Reach into the box the way your packer does, several times.**
 
 ```
   time  state     signal bar           motion bar           pieces
@@ -235,107 +293,97 @@ several times. You get a live readout:
    6.6  idle       0.000 ----|-------   0.000 ----|-------  1
 ```
 
-- **signal** — how strongly an arm is seen in the watch band. The `|` in the
-  bar marks the current threshold.
+- **signal** — how strongly an arm is detected. The `|` marks the threshold.
 - **motion** — movement inside the box.
-- **state** flips to `HAND IN` while a reach is detected; **pieces**
-  increments when a completed reach is accepted.
+- **state** should read `HAND IN` for the whole reach and `idle` between.
+- **pieces** should go up by exactly 1 per reach.
 
-What you want to see: `idle` while your hand is away, `HAND IN` for the whole
-reach, and pieces incrementing **once per reach**.
-
-At the end it prints statistics and recommended values:
+At the end it prints recommended values:
 
 ```
 arm signal while idle : p50=0.000 p95=0.004   (must stay BELOW arm_enter_frac)
 arm signal while HAND : p50=0.110 p95=0.224   (must stay ABOVE arm_exit_frac)
-interior motion, hand : p50=0.251 p95=0.319
-
 Suggested:  arm_enter_frac: 0.060   arm_exit_frac: 0.025
 Suggested:  interior_motion_frac: 0.061
 ```
 
-Copy the suggested values into `config.yaml`. If it instead prints
-**"idle and hand signals overlap"**, the arm isn't cleanly separable — widen
-`ring_px`, improve the lighting, or move the queued box further away.
+Put those into the `packing:` section of `config/config.yaml`.
 
-| Symptom | Fix |
+| Problem | Fix |
 |---|---|
-| Reaches not detected at all | lower `arm_enter_frac`; widen `ring_px` |
-| Quick reaches missed | lower `min_visit_frames` 4 → 2; raise `camera.fps` |
-| One reach counted as two | raise `exit_frames` 3 → 6 (absorbs a brief pull-back) |
-| Hand state stuck `HAND IN` | something static is in the band — check the geometry snapshot |
-
-## Step 10. Tune what counts as a placed piece
-
-A reach counts only if there was real **motion inside the box** during it.
-
-- Empty-handed adjustments being counted → raise `interior_motion_frac`, or
-  set `appearance_check: true` (also requires the contents to *look*
-  different afterwards — stricter, best when pads visibly change the box).
-- Real placements missed → lower `interior_motion_frac`; make sure the
-  **blue** interior box from step 8 covers where pads land.
+| Reaches not detected | lower `arm_enter_frac`; raise `ring_px` to 40 |
+| Quick reaches missed | lower `min_visit_frames` to 2 |
+| One reach counted twice | raise `exit_frames` to 6 |
+| Empty-handed adjustments counted | raise `interior_motion_frac`; or set `appearance_check: true` |
+| "idle and hand signals overlap" | the arm is not clearly separable — improve lighting, or move the queued box further from the packing spot |
 
 **If your packer places a fixed bundle per reach** (e.g. 3 pads in one
-motion), the camera sees one reach — set:
-
-```yaml
-  pieces_per_visit: 3
-```
-
-**Optional QA check** — flag boxes that leave with the wrong count:
-
-```yaml
-  expected_pieces: 3    # warns in the log, highlights red on the dashboard
-```
-
-## Step 11. Verify piece counting
-
-Pack 10 boxes normally and compare the dashboard against what you counted by
-hand. Check the per-box table on the dashboard (`pcs` and `pack` columns), or:
-
-```bash
-sqlite3 data/boxcount.db \
-  "SELECT iso, pieces, pack_seconds FROM events ORDER BY id DESC LIMIT 10;"
-```
-
-Pack times should match a stopwatch within about a second (the box's stop →
-departure, so it includes any pause before the belt indexes on).
+motion), the camera sees one reach. Set `pieces_per_visit: 3`.
 
 ---
 
-## Step 12. Lock it in
+# STEP 6 — Verify the whole thing
 
 ```bash
-sudo systemctl start boxcounter        # or: restart
+python3 -m boxcounter
+```
+
+Pack 10 boxes normally and watch the panel:
+
+```
+┌─ TOTALS ──────────────────────────────────────────┐
+│ Boxes counted                                  10 │
+│ Average pack time                          11.4 s │
+│ Average pads per box                          3.0 │
+└───────────────────────────────────────────────────┘
+```
+
+Compare against what you counted by hand. Check the per-box rows in
+`RECENT BOXES` — a wrong pad count on one box points at Step 5; a wrong box
+count points at Step 4.
+
+Press **Ctrl-C** to stop.
+
+---
+
+# STEP 7 — Lock it in
+
+```bash
+cp config/config.yaml ~/config-working-$(date +%F).yaml   # keep a copy!
+sudo systemctl start boxcounter
 systemctl status boxcounter
-journalctl -u boxcounter -f            # watch a few real boxes go by
 ```
 
-Back up your calibration — it's the only thing here that's unique to your
-line:
-
-```bash
-cp config/config.yaml ~/config-backup-$(date +%F).yaml
-```
-
-Re-check calibration after: moving the camera or lights, changing box sizes
-or belt speed, or a seasonal daylight change if any daylight reaches the belt.
+Your calibration is the only thing here unique to your line. Keep that copy
+somewhere safe.
 
 ---
 
-## Quick performance check
+## Re-calibrate when any of these change
+
+- the camera or light is moved or bumped,
+- box sizes change,
+- belt speed changes,
+- daylight starts reaching the belt at a different time of year.
+
+Quick health check any time:
 
 ```bash
-python3 tools/benchmark.py --frames 300
+python3 tools/wizard.py --diagnose --seconds 30
 ```
 
-On a Pi 5 at 640×480 expect detection under 6 ms/frame and an end-to-end rate
-comfortably above your camera fps. If detection is slow, something raised the
-resolution — 640×480 is the intended operating point.
+## Command summary
 
-## Full parameter reference
+| Command | Purpose |
+|---|---|
+| `python3 tools/wizard.py` | guided run through all steps |
+| `python3 tools/wizard.py --diagnose` | **where is it broken?** |
+| `python3 tools/wizard.py --live` | see what the camera sees |
+| `python3 tools/wizard.py --geometry` | learn and write the geometry |
+| `python3 tools/calibrate.py --packing` | tune pad detection |
+| `python3 -m boxcounter --check` | verify install and config |
+| `python3 -m boxcounter` | run it |
 
-Every parameter is documented inline in `config/config.yaml`. The packing
-concept, station layout, and what the system can and cannot count are in
-[PACKING.md](PACKING.md); day-to-day operation is in [RUNNING.md](RUNNING.md).
+Full parameter documentation is inline in `config/config.yaml`. The packing
+concept and its limits are in [PACKING.md](PACKING.md); day-to-day operation
+is in [RUNNING.md](RUNNING.md).

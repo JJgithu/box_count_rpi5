@@ -64,10 +64,23 @@ sudo apt-get update && sudo apt-get install -y git
 git clone https://github.com/JJgithu/box_count_rpi5.git   # public repo: no auth
 cd box_count_rpi5
 bash scripts/install.sh                      # apt packages + systemd unit
-python3 tools/calibrate.py                   # snapshot with grid/ROI/line overlay
+python3 -m boxcounter --check                # verify install and config
+python3 tools/wizard.py                      # guided calibration (see below)
 python3 -m boxcounter                        # run; dashboard at http://<pi>:8080
 sudo systemctl enable --now boxcounter       # run at every boot
 ```
+
+**Not counting anything?** The wizard replays the real detection chain and
+tells you the exact stage that fails, then sets the geometry for you:
+
+```bash
+python3 tools/wizard.py --diagnose     # where does the chain break?
+python3 tools/wizard.py --live         # see what the camera sees, in the terminal
+python3 tools/wizard.py --geometry     # learn ROI/line/zone from real boxes
+```
+
+No browser or file copying needed — the camera view is drawn as text, so it
+works over SSH. Full procedure: [docs/CALIBRATION.md](docs/CALIBRATION.md).
 
 > If the repo is **private**, authenticate first (token / SSH key / gh). For an
 > offline target the cleanest route is to **not clone on the Pi at all** — copy
@@ -89,6 +102,7 @@ python3 -m pytest tests/                     # 38 tests incl. exact-count e2e
 | Document | Contents |
 |---|---|
 | [docs/IMPLEMENTATION_GUIDE.md](docs/IMPLEMENTATION_GUIDE.md) | **Start here** — complete step-by-step deployment walkthrough |
+| [docs/CALIBRATION.md](docs/CALIBRATION.md) | **If it isn't counting** — hyper-detailed calibration procedure |
 | [docs/RUNNING.md](docs/RUNNING.md) | Day-to-day operation: starting, stopping, logs, reading counts |
 | [docs/PACKING.md](docs/PACKING.md) | Pieces-per-box + pack-time monitoring: concept, layout, tuning |
 | [docs/HARDWARE_SETUP.md](docs/HARDWARE_SETUP.md) | Mounting height/FoV math, lighting, wiring, GPIO to PLC |
@@ -108,8 +122,12 @@ boxcounter/          the application package
   storage.py           SQLite + daily CSV persistence
   gpio_out.py          one pulse per box (PLC / stack light)
   webui.py             offline LAN dashboard with live MJPEG view
+  status.py            live terminal panel (totals, averages, last box)
+  asciiview.py         camera view as text, for calibrating over SSH
+  configedit.py        comment-preserving config writer
 config/config.yaml   all tunables, heavily commented
-tools/               calibrate, capture background, synthetic video, benchmark
+tools/               wizard (diagnose/live/geometry), calibrate, export_csv,
+                     capture background, synthetic video, benchmark
 tests/               unit + exact-count end-to-end tests
 scripts/, systemd/   installer and boot service
 ```
