@@ -20,6 +20,7 @@ from .counter import LineCounter
 from .detector import BoxDetector
 from .gpio_out import GpioPulse
 from .packing import PackingMonitor
+from .status import StatusDisplay, supported as status_supported
 from .storage import CountStore
 from .tracker import CentroidTracker
 from .webui import SharedState, WebUI
@@ -55,11 +56,14 @@ class Pipeline:
                  video_override: Optional[str] = None,
                  display: bool = False,
                  enable_web: Optional[bool] = None,
-                 max_frames: Optional[int] = None):
+                 max_frames: Optional[int] = None,
+                 status: Optional[bool] = None):
         self.cfg = cfg
         self.source = source or create_source(cfg.camera, video_override)
         self.display = display
         self.max_frames = max_frames
+        # Live panel on a terminal; plain log lines under systemd/journal.
+        self.use_status = status_supported() if status is None else status
 
         self.detector = BoxDetector(cfg.processing)
         self.tracker: Optional[CentroidTracker] = None    # built on first frame
@@ -81,12 +85,22 @@ class Pipeline:
         self._start_ts = time.monotonic()
         self._fps = 0.0
 
+        # Averages since the last reset, resumed from the database.
+        self._summary = self.store.summary()
+
         self.state = SharedState()
         self.web: Optional[WebUI] = None
         if enable_web if enable_web is not None else cfg.web.enabled:
             self.web = WebUI(cfg.web, self.state,
                              reset_cb=self.request_reset,
                              recent_cb=self.store.recent)
+
+        self.status: Optional[StatusDisplay] = None
+        if self.use_status:
+            self.status = StatusDisplay(
+                csv_path=str(self.store.csv_path_for(time.time()))
+                if cfg.output.csv else "",
+                packing=cfg.packing.enabled)
 
     # -- control ---------------------------------------------------------
 
@@ -154,26 +168,29 @@ class Pipeline:
         return float(len(self._event_times))
 
     def _stats(self) -> dict:
+        avg_pieces = self._summary.get("avg_pieces")
+        avg_pack = self._summary.get("avg_pack_seconds")
         s = {
             "total": self.total,
             "session": self.session_count,
             "rate_per_min": self._rate_per_min(),
             "fps": round(self._fps, 1),
             "uptime_s": int(time.monotonic() - self._start_ts),
+            # Averages over every box since the last reset (from the database,
+            # so they survive restarts).
+            "avg_pieces": round(avg_pieces, 1) if avg_pieces is not None else None,
+            "avg_pack_seconds": round(avg_pack, 1) if avg_pack is not None else None,
         }
         if self.packing is not None:
             s["packing"] = True
             s["pieces_total"] = self.pieces_total
             s["expected_pieces"] = self.cfg.packing.expected_pieces or None
+            # legacy keys kept for the dashboard
+            s["avg_pack_s"] = s["avg_pack_seconds"]
             hist = [p for p in self._pack_history if p[0] is not None]
             if hist:
-                last = hist[-1]
-                s["last_pieces"] = last[0]
-                s["last_pack_s"] = last[1]
-                s["avg_pieces"] = round(sum(p[0] for p in hist) / len(hist), 1)
-                times = [p[1] for p in hist if p[1] is not None]
-                if times:
-                    s["avg_pack_s"] = round(sum(times) / len(times), 1)
+                s["last_pieces"] = hist[-1][0]
+                s["last_pack_s"] = hist[-1][1]
             s.update(self.packing.live_stats(self._media_time()))
         return s
 
@@ -192,6 +209,9 @@ class Pipeline:
         wd_clock = 0.0
         _sd_notify("READY=1")           # tell systemd startup is complete
         log.info("Pipeline running (resumed total: %d)", self.total)
+        if self.status is not None:
+            self.status.start()
+            self.status.draw(self._stats(), force=True)
 
         try:
             while not self._stop:
@@ -266,10 +286,15 @@ class Pipeline:
                             ev.pack_seconds = session.pack_seconds
                             self.pieces_total += session.pieces
                         self._pack_history.append((ev.pieces, ev.pack_seconds))
+                    ev.box_number = self.total
                     self.store.record(ev)
                     self.gpio.pulse()
-                    if ev.pieces is not None:
-                        log.info("BOX #%d (track %d, %dx%d px) — %d pieces, "
+                    self._summary = self.store.summary()
+                    if self.status is not None:
+                        self.status.add_box(self.total, ev.pieces,
+                                            ev.pack_seconds, ev.ts)
+                    elif ev.pieces is not None:
+                        log.info("BOX #%d (track %d, %dx%d px) — %d pads, "
                                  "packed in %.1f s",
                                  self.total, ev.track_id, ev.bbox[2], ev.bbox[3],
                                  ev.pieces, ev.pack_seconds or 0.0)
@@ -283,6 +308,7 @@ class Pipeline:
                     self.total = 0
                     self.pieces_total = 0
                     self._pack_history.clear()
+                    self._summary = self.store.summary()
 
                 # fps (exponential moving average)
                 now = time.monotonic()
@@ -307,7 +333,11 @@ class Pipeline:
                                          self.counter.line if self.counter else 0,
                                          self.total, self._fps, self._rate_per_min(),
                                          packing=pack_overlay)
-                self.state.update(annotated, mask_to_bgr(mask), self._stats())
+                stats = self._stats()
+                self.state.update(annotated, mask_to_bgr(mask), stats)
+
+                if self.status is not None:
+                    self.status.draw(stats)
 
                 if self.display:
                     cv2.imshow("boxcounter", annotated)
@@ -317,8 +347,10 @@ class Pipeline:
 
                 if now - last_heartbeat >= cfg.output.heartbeat_seconds:
                     last_heartbeat = now
-                    log.info("heartbeat: total=%d rate=%.1f/min fps=%.1f tracks=%d",
-                             self.total, self._rate_per_min(), self._fps, len(tracks))
+                    if self.status is None:      # the panel already shows this
+                        log.info("heartbeat: total=%d rate=%.1f/min fps=%.1f tracks=%d",
+                                 self.total, self._rate_per_min(), self._fps,
+                                 len(tracks))
 
                 # Pet the systemd watchdog ~1x/s; if the loop ever hangs, the
                 # pings stop and systemd restarts us.
@@ -330,6 +362,8 @@ class Pipeline:
                     break
         finally:
             _sd_notify("STOPPING=1")
+            if self.status is not None:
+                self.status.stop()
             self.source.stop()
             self.store.close()
             self.gpio.close()

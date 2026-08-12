@@ -94,27 +94,58 @@ class CountStore:
             except OSError:
                 log.exception("CSV write failed; continuing")
 
-    _CSV_HEADER = ["timestamp", "track_id", "x", "y", "w", "h",
-                   "area", "direction", "pieces", "pack_seconds"]
+    # One row per counted box. The four columns that matter come first so the
+    # file is readable as-is in a spreadsheet; the rest is detection detail
+    # kept for diagnostics.
+    _CSV_HEADER = ["box", "timestamp", "pads", "pack_seconds",
+                   "track_id", "x", "y", "w", "h", "area", "direction"]
+
+    def csv_path_for(self, ts: float) -> Path:
+        """Path of the daily CSV a given timestamp belongs to."""
+        day = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+        path = self.data_dir / f"events_{day}.csv"
+        # A day file left by an older version has a different header; roll to
+        # a sibling file instead of appending mismatched rows under it.
+        if path.exists():
+            try:
+                with open(path, newline="") as f:
+                    if next(csv.reader(f), None) != self._CSV_HEADER:
+                        path = self.data_dir / f"events_{day}_v2.csv"
+            except OSError:
+                pass
+        return path
 
     def _append_csv(self, ev: CountEvent, iso: str) -> None:
-        day = datetime.fromtimestamp(ev.ts).strftime("%Y-%m-%d")
-        path = self.data_dir / f"events_{day}.csv"
-        # A day file left by an older version has a shorter header; roll to a
-        # sibling file instead of appending mismatched rows under it.
-        if path.exists():
-            with open(path, newline="") as f:
-                if next(csv.reader(f), None) != self._CSV_HEADER:
-                    path = self.data_dir / f"events_{day}_v2.csv"
+        path = self.csv_path_for(ev.ts)
         new_file = not path.exists()
         with open(path, "a", newline="") as f:
             writer = csv.writer(f)
             if new_file:
                 writer.writerow(self._CSV_HEADER)
             x, y, w, h = ev.bbox
-            writer.writerow([iso, ev.track_id, x, y, w, h, int(ev.area), ev.direction,
-                             "" if ev.pieces is None else ev.pieces,
-                             "" if ev.pack_seconds is None else round(ev.pack_seconds, 2)])
+            writer.writerow([
+                "" if ev.box_number is None else ev.box_number,
+                iso,
+                "" if ev.pieces is None else ev.pieces,
+                "" if ev.pack_seconds is None else round(ev.pack_seconds, 2),
+                ev.track_id, x, y, w, h, int(ev.area), ev.direction])
+
+    def summary(self) -> dict:
+        """Totals and averages since the last reset, for the status display."""
+        with self._lock:
+            if self._conn is None:
+                return {"total": 0, "avg_pieces": None, "avg_pack_seconds": None,
+                        "pieces_total": 0}
+            row = self._conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(pieces), 0), AVG(pieces),"
+                " AVG(pack_seconds) FROM events WHERE id > ?",
+                (self._last_reset_id(),)).fetchone()
+        return {
+            "total": int(row[0]),
+            "pieces_total": int(row[1]),
+            "avg_pieces": row[2],
+            "avg_pack_seconds": row[3],
+        }
 
     def total(self) -> int:
         """Count of events since the last reset (0 if SQLite disabled)."""

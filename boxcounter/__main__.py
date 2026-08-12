@@ -106,6 +106,8 @@ def main(argv=None) -> int:
                         help="override output.log_level (DEBUG, INFO, ...)")
     parser.add_argument("--check", action="store_true",
                         help="verify dependencies and config, then exit")
+    parser.add_argument("--no-status", action="store_true",
+                        help="plain log lines instead of the live status panel")
     args = parser.parse_args(argv)
 
     rc = _check_core_deps()
@@ -137,9 +139,14 @@ def main(argv=None) -> int:
         print(f"  data dir : {cfg.output.data_dir}")
         return 0
 
+    from .status import supported as status_supported   # light import
+    use_status = (not args.no_status) and status_supported() \
+        and not args.log_level
+
     level = (args.log_level or cfg.output.log_level).upper()
     logging.basicConfig(
-        level=getattr(logging, level, logging.INFO),
+        # The panel owns the screen; routine INFO chatter would corrupt it.
+        level=logging.WARNING if use_status else getattr(logging, level, logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         datefmt="%H:%M:%S")
 
@@ -148,7 +155,8 @@ def main(argv=None) -> int:
                         video_override=args.source,
                         display=args.display,
                         enable_web=False if args.no_web else None,
-                        max_frames=args.max_frames)
+                        max_frames=args.max_frames,
+                        status=use_status)
     pipeline.install_signal_handlers()
     summary = pipeline.run()
     print(f"frames={summary['frames']} counted_total={summary['total']} "

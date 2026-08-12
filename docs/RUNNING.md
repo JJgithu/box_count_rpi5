@@ -19,25 +19,51 @@ python3 -m boxcounter
 ```
 
 That's the whole command. It reads `config/config.yaml`, opens the camera,
-and starts counting. You'll see:
+and shows a live panel that refreshes in place:
 
 ```
-15:04:21 INFO boxcounter.camera: Picamera2 started: 640x480 @ 30 fps
-15:04:24 INFO boxcounter.camera: Locked exposure: 8993 us, gain 1.80
-15:04:24 INFO boxcounter.detector: Detector initialized: frame 640x480, ROI (32, 0, 576, 480)
-15:04:24 INFO boxcounter.webui: Web dashboard on http://0.0.0.0:8080/
-15:04:24 INFO boxcounter.pipeline: Pipeline running (resumed total: 0)
-15:04:29 INFO boxcounter.packing:  Packing session started (track 3, bbox (233, 96, 158, 122))
-15:04:33 INFO boxcounter.packing:  Insertion #1 into box (track 3) — visit 14 frames, motion 0.22
-15:04:40 INFO boxcounter.packing:  Packing session ended (departed): track 3, 3 pieces, 11.4 s
-15:04:42 INFO boxcounter.pipeline: BOX #1 (track 3, 142x118 px) — 3 pieces, packed in 11.4 s
-15:04:54 INFO boxcounter.pipeline: heartbeat: total=1 rate=5.7/min fps=30.0 tracks=1
+ BOX COUNTER                                          15:31:19   30 fps
+
+┌─ TOTALS ─────────────────────────────────────────────────────────────┐
+│ Boxes counted                                                     42 │
+│ Average pack time                                             11.4 s │
+│ Average pads per box                                             3.0 │
+│ Pads counted (total)                                             126 │
+│ Boxes per minute                                                 5.2 │
+└──────────────────────────────────────────────────────────────────────┘
+
+┌─ LAST BOX ───────────────────────────────────────────────────────────┐
+│ Box #42   at 15:31:19                                3 pads   10.9 s │
+└──────────────────────────────────────────────────────────────────────┘
+
+┌─ RECENT BOXES ───────────────────────────────────────────────────────┐
+│   box   pads   pack time      time                                   │
+│    42      3      10.9 s  15:31:19                                   │
+│    41      4      14.2 s  15:30:59                                   │
+│    40      2       9.8 s  15:30:39                                   │
+└──────────────────────────────────────────────────────────────────────┘
+
+ packing now: 2 pads, 8s  — hand in box
+
+ CSV: /home/pi/box_count_rpi5/data/events_2026-08-12.csv
+ Ctrl-C to stop
 ```
 
-- **`BOX #n`** — one line every time a box is counted (with pieces + pack
-  time when packing monitoring is on — see [PACKING.md](PACKING.md)).
-- **`heartbeat`** — a status line every 30 s, even when nothing passes. If
-  heartbeats stop, something is wrong.
+Totals and averages cover **every box since the last reset** and are read
+from the database, so they survive restarts.
+
+The panel appears only on a real terminal. Under systemd the same
+information goes to the journal as log lines (a redrawing panel would be
+unreadable there). To force log lines on a terminal — for debugging, or to
+pipe output to a file:
+
+```bash
+python3 -m boxcounter --no-status
+python3 -m boxcounter --log-level DEBUG     # implies --no-status
+```
+
+In log mode you get one `BOX #n ... — 3 pads, packed in 11.4 s` line per box
+plus a `heartbeat` every 30 s. **If heartbeats stop, something is wrong.**
 
 **Stop it with `Ctrl-C`.** It shuts down cleanly and the total is saved.
 
@@ -131,15 +157,68 @@ sudo systemctl restart boxcounter
 
 ## 3. Reading the counts
 
+### The CSV
+
+**The counter writes a CSV automatically — one row per counted box** — to:
+
+```
+~/box_count_rpi5/data/events_YYYY-MM-DD.csv
+```
+
+A new file per day, created on the first box of that day. Columns:
+
+```
+box,timestamp,pads,pack_seconds,track_id,x,y,w,h,area,direction
+1,2026-08-12T15:31:00,3,4.67,1,240,326,157,128,20096,1
+2,2026-08-12T15:31:02,2,3.58,5,164,323,169,134,22646,1
+3,2026-08-12T15:31:04,4,5.71,8,210,325,152,129,19608,1
+```
+
+The first four columns are what you asked for — box number, when it was
+counted, how many pads went in, how long the pack took. The rest is
+detection detail kept for diagnostics; ignore or delete those columns.
+
+Read it on the Pi, or copy it to a PC:
+
+```bash
+column -s, -t data/events_$(date +%F).csv       # on the Pi, readable
+# from your PC:
+scp <pi-user>@boxcounter.local:box_count_rpi5/data/events_*.csv .
+```
+
+### One file for a whole week or shift
+
+The daily files are convenient for rotation but awkward for reporting, so
+there's an exporter that pulls any date range out of the database into a
+single clean CSV:
+
+```bash
+python3 tools/export_csv.py -o report.csv                     # everything
+python3 tools/export_csv.py --today -o today.csv
+python3 tools/export_csv.py --since 2026-08-01 --until 2026-08-08 -o week.csv
+python3 tools/export_csv.py --summary                         # just the numbers
+```
+
+`--summary` prints the headline figures:
+
+```
+Boxes counted        : 412
+Pads counted (total) : 1236
+Average pads per box : 3.0
+Average pack time    : 11.4 s
+Fastest / slowest    : 8.2 s / 26.7 s
+```
+
+### Everything else
+
 | Where | How |
 |---|---|
 | Dashboard | `http://<pi-ip>:8080` |
 | Just the numbers | `curl -s http://<pi-ip>:8080/api/stats` |
 | Reset to zero | click **Reset count** on the dashboard, or `curl -X POST http://<pi-ip>:8080/api/reset` |
-| Today's CSV | `column -s, -t data/events_$(date +%F).csv` |
 | Database | `sqlite3 data/boxcount.db "SELECT COUNT(*) FROM events;"` |
 | Counts per hour | `sqlite3 data/boxcount.db "SELECT substr(iso,1,13) h, COUNT(*) FROM events GROUP BY h;"` |
-| Pieces + pack time per box | `sqlite3 data/boxcount.db "SELECT iso, pieces, pack_seconds FROM events ORDER BY id DESC LIMIT 20;"` |
+| Pads + pack time per box | `sqlite3 data/boxcount.db "SELECT iso, pieces, pack_seconds FROM events ORDER BY id DESC LIMIT 20;"` |
 
 The running total **survives restarts and reboots** — it resumes from the
 database. "Reset count" starts a new tally without deleting history; the old

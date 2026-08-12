@@ -32,6 +32,7 @@ class CountEvent:
     # Filled in by the pipeline from the packing monitor, when enabled:
     pieces: Optional[int] = None          # pads placed into this box
     pack_seconds: Optional[float] = None  # arrival -> departure at the station
+    box_number: Optional[int] = None      # running box count since last reset
 
 
 _EDGE_PX = 2      # bbox closer than this to a travel-axis frame edge = touching
