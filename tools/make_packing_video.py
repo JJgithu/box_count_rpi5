@@ -50,6 +50,10 @@ def _draw_box(frame, x, y, w, h, pads, rng_colors):
 
 
 def _draw_arm(frame, height, cx, tip_y, width_px=70, wobble=0):
+    """Arm reaching up from the bottom edge. Drawn with smooth, low-contrast
+    fill like real skin and sleeve: frame differencing inside a box that the
+    hand fully covers then sees almost no motion, which is what a real hand
+    looks like to the detector."""
     """Arm reaching up from the bottom edge to tip_y, hand at the tip."""
     x0 = int(cx - width_px / 2 + wobble)
     cv2.rectangle(frame, (x0, int(tip_y) + 18, ),
@@ -61,7 +65,8 @@ def _draw_arm(frame, height, cx, tip_y, width_px=70, wobble=0):
 def generate_packing_video(path: str, pieces_per_box=(3, 2), width: int = 640,
                            height: int = 480, fps: int = 24, speed: float = 6.0,
                            lead_in_s: float = 4.0, stop_frac: float = 0.30,
-                           seed: int = 7) -> dict:
+                           seed: int = 7, box_w=(140, 180), box_h=(110, 140),
+                           gap_s: float = 0.42, hold_s: float = 0.25) -> dict:
     """Write the video; returns ground truth {boxes, pieces, pack_seconds}."""
     rng = random.Random(seed)
     nrng = np.random.default_rng(seed)
@@ -69,7 +74,15 @@ def generate_packing_video(path: str, pieces_per_box=(3, 2), width: int = 640,
     belt_h = belt.shape[0]
 
     # per-reach phase lengths (frames)
-    EXTEND, HOLD, RETRACT, GAP = 5, 6, 5, 10
+    EXTEND, RETRACT = 5, 5
+    # How long the hand rests over the box during a reach. A packer settling
+    # a pad in place holds for a second or more, which is much longer than a
+    # brisk synthetic reach and exercises the static-occupant logic.
+    HOLD = max(2, int(hold_s * fps))
+    # Pause between reaches. A real packer takes seconds between pads; the
+    # belt and box are perfectly still during that pause, which is exactly
+    # when a background model can absorb a stationary box.
+    GAP = max(1, int(gap_s * fps))
     SETTLE_IN, SETTLE_OUT = 8, 12
     BOX_GAP = 24              # frames between one box leaving and next entering
 
@@ -77,8 +90,8 @@ def generate_packing_video(path: str, pieces_per_box=(3, 2), width: int = 640,
     # box_state: (box_index, y) or None;  arm_state: (box_index, tip_y) or None
     boxes = []
     for i, n in enumerate(pieces_per_box):
-        w = rng.randint(140, 180)
-        h = rng.randint(110, 140)
+        w = rng.randint(*box_w)
+        h = rng.randint(*box_h)
         x = rng.randint(int(width * 0.25), int(width * 0.65) - w)
         color = (70 + rng.randint(-8, 8), 110 + rng.randint(-8, 8),
                  150 + rng.randint(-8, 8))
@@ -107,6 +120,10 @@ def generate_packing_video(path: str, pieces_per_box=(3, 2), width: int = 640,
             for f in range(EXTEND):
                 tip = height - (height - interior_cy) * (f + 1) / EXTEND
                 frames.append((i, stop_y, tip, 0.0))
+            # The hand rests over the box while the pad is placed: it covers
+            # the interior and barely moves, which is the realistic case and
+            # the one that used to blind arm detection for later reaches.
+            rest_tip = stop_y - 45
             for f in range(HOLD):
                 if f == HOLD // 2:      # pad appears mid-hold
                     pw = int(bx["w"] * 0.5) + rng.randint(-8, 8)
@@ -116,7 +133,7 @@ def generate_packing_video(path: str, pieces_per_box=(3, 2), width: int = 640,
                     py = rng.randint(int(bx["h"] * 0.15), max(int(bx["h"] * 0.15) + 1,
                                      bx["h"] - ph - int(bx["h"] * 0.15)))
                     bx["pads"].append((px, py, pw, ph))
-                frames.append((i, stop_y, interior_cy + (f % 3) * 4 - 4, 0.0))
+                frames.append((i, stop_y, rest_tip + (f % 2), 0.0))
             for f in range(RETRACT):
                 tip = interior_cy + (height - interior_cy) * (f + 1) / RETRACT
                 frames.append((i, stop_y, None if f == RETRACT - 1 else tip, 0.0))
@@ -184,7 +201,9 @@ def _render(path, frames, boxes, belt, width, height, fps, nrng,
             _draw_box(frame, bx["x"], int(y), bx["w"], bx["h"], pads, bx["color"])
             if tip is not None:
                 cx = bx["x"] + bx["w"] * 0.5
-                _draw_arm(frame, height, cx, tip, wobble=(fi % 3) * 3 - 3)
+                arm_w = max(70, int(bx["w"] * 1.15))
+                _draw_arm(frame, height, cx, tip, width_px=arm_w,
+                          wobble=(fi % 3) - 1)
 
         noise = nrng.normal(0, 2.0, (height, width, 1))
         frame = np.clip(frame.astype(np.int16) + noise, 0, 255).astype(np.uint8)
@@ -207,9 +226,20 @@ def main() -> int:
     ap.add_argument("--fps", type=int, default=24)
     ap.add_argument("--speed", type=float, default=6.0)
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--box-size", type=int, nargs=2, metavar=("W", "H"),
+                    help="fixed box size in pixels (default: random 140-180 x 110-140)")
+    ap.add_argument("--gap", type=float, default=0.42,
+                    help="seconds the packer pauses between pads (default 0.42)")
+    ap.add_argument("--hold", type=float, default=0.25,
+                    help="seconds the hand rests in the box per pad (default 0.25)")
     args = ap.parse_args()
+    kw = {}
+    if args.box_size:
+        kw = {"box_w": (args.box_size[0], args.box_size[0] + 1),
+              "box_h": (args.box_size[1], args.box_size[1] + 1)}
     truth = generate_packing_video(args.out, pieces_per_box=tuple(args.pieces),
-                                   fps=args.fps, speed=args.speed, seed=args.seed)
+                                   fps=args.fps, speed=args.speed, seed=args.seed,
+                                   gap_s=args.gap, hold_s=args.hold, **kw)
     print(f"Wrote {args.out}: {truth}")
     print("Try:  python3 -m boxcounter --source", args.out, "--no-web")
     print("(enable packing in the config first — see config/config.yaml)")

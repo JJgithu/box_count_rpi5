@@ -107,7 +107,11 @@ packing:
   min_arrival_px: 30          # a box must be SEEN arriving (moved this far
                               # since first tracked) before a session starts
   depart_frames: 5            # frames of lost overlap to declare departure
-  track_grace_frames: 60      # survive lost tracking (packer leaning over)
+  track_grace_frames: 150     # how long a box may go untracked (~5 s) before
+                              # the session is abandoned. The packer's hand can
+                              # hide a small box completely for seconds, and an
+                              # unseen box is not a departed box — departure is
+                              # detected geometrically and does not wait here
   max_session_s: 600          # give up on a session after 10 minutes
   # -- arm detection (band around the parked box) --
   ring_px: 28                 # width of the watch band around the box
@@ -116,9 +120,13 @@ packing:
   enter_frames: 2             # debounce
   exit_frames: 3
   min_visit_frames: 4         # ignore shorter blips
-  static_exit_frames: 36      # "hand" motionless this long = it's really a
-                              # static object (queued box) — close the visit
-                              # and absorb it into the baseline
+  static_exit_frames: 300     # "hand" motionless this long (~10 s) = it is
+                              # really a static object (a queued box) — close
+                              # the visit and absorb it into the baseline.
+                              # Generous on purpose: resting a hand in the box
+                              # for a second or two is normal, and on a small
+                              # box a hand fills the whole interior so little
+                              # motion is measurable
   max_visit_frames: 300       # hard backstop for a stuck visit
   # -- insertion confirmation (inside the box) --
   interior_inset_frac: 0.12   # how far inside the bbox the "interior" starts

@@ -89,6 +89,7 @@ class BoxDetector:
         self._min_area = 0.0
         self._max_area = 0.0
         self._prev_fg_fraction = 0.0
+        self._prev_box_present = False  # a box-sized blob was accepted last frame
         self._frozen_frames = 0        # consecutive frames with learning frozen
         self._relearn_blank = 0        # frames to blank after a model rebuild
         # Set when the escape hatch rebuilds the model mid-run; the pipeline
@@ -148,6 +149,7 @@ class BoxDetector:
         """Force re-initialization (e.g. after a camera restart)."""
         self._initialized = False
         self._prev_fg_fraction = 0.0
+        self._prev_box_present = False
         self._frozen_frames = 0
         self._relearn_blank = 0
         self.relearned = False
@@ -170,8 +172,17 @@ class BoxDetector:
         if cfg.method == "mog2":
             # Learn the background only while the belt is (nearly) empty, so
             # passing/stalled boxes are never absorbed into the model.
+            #
+            # Two independent triggers, because neither alone is enough:
+            #  - foreground fraction, which catches large boxes but misses a
+            #    box smaller than the threshold (it would be quietly learned
+            #    away within a second of stopping at the packing station);
+            #  - an accepted box-sized blob in the previous frame, which
+            #    catches small boxes at any size we are willing to count,
+            #    while sensor noise (always below min_area) never trips it.
             lr = cfg.learning_rate
-            if self._prev_fg_fraction > cfg.freeze_learning_fg_fraction:
+            if (self._prev_fg_fraction > cfg.freeze_learning_fg_fraction
+                    or self._prev_box_present):
                 lr = 0.0
             # Count toward the relearn escape hatch ONLY when almost the whole
             # ROI is foreground. Normal box traffic covers part of the ROI with
@@ -216,6 +227,7 @@ class BoxDetector:
         # transient garbage mask is never fed to the tracker/counter.
         if self._relearn_blank > 0:
             self._relearn_blank -= 1
+            self._prev_box_present = False
             return [], mask
 
         if self._open_k is not None:
@@ -247,4 +259,7 @@ class BoxDetector:
                 centroid=(fx + bw / 2.0, fy + bh / 2.0),
                 area=area,
             ))
+        # Remembered for the next frame's learning decision: while a real box
+        # is in view the model must not adapt, however small the box is.
+        self._prev_box_present = bool(detections)
         return detections, mask

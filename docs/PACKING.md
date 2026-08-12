@@ -94,6 +94,9 @@ progress. Watch a few boxes get packed and check the overlay counts along.
 
 | Symptom | Fix |
 |---|---|
+| **Only the first pad is counted, then the box is "lost"** | fixed in Aug 2026 — update the code. It affected boxes smaller than 2% of the view, which were quietly absorbed into the background about a second after stopping. If it persists, check `--live`: the parked box must stay visible in the mask the whole time it sits there |
+| Pads missed when the packer rests a hand in the box | raise `static_exit_frames`; a hand covering a small box registers almost no motion inside it |
+| Session ends while the hand is still in the box | raise `track_grace_frames` (a hand can hide a small box completely) |
 | Reaches missed entirely | lower `arm_enter_frac` (0.06 → 0.04); check the arm actually crosses the band in the mask view; widen `ring_px` |
 | Quick reaches missed | lower `min_visit_frames` (4 → 2); raise camera fps |
 | Double-counted reaches (hand hovering at the box edge) | raise `exit_frames` (3 → 6) so brief pull-backs don't split one reach in two |

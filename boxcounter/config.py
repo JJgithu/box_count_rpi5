@@ -123,7 +123,12 @@ class PackingConfig:
     # ghost blobs (e.g. after a background rebuild) from capturing sessions.
     min_arrival_px: float = 30.0
     depart_frames: int = 5            # consecutive gone/out-of-zone frames to end
-    track_grace_frames: int = 60      # survive lost tracking (packer occlusion)
+    # How long a box may go untracked before the session is abandoned. The
+    # packer's hand can hide a small box completely for several seconds, and
+    # a box that cannot be seen is not the same as a box that has left, so
+    # this is deliberately generous (5 s). Departure is detected
+    # geometrically and does not wait for this.
+    track_grace_frames: int = 150
     max_session_s: float = 600.0      # abandon a session after this long
     # -- arm detection (ring around the box) --
     ring_px: int = 28                 # width of the band around the box bbox
@@ -135,7 +140,11 @@ class PackingConfig:
     # If the "hand present" state persists this long with no motion inside the
     # box, the occupant is static (e.g. the next box queued into the watch
     # band) — the visit is closed and the new scene adopted as baseline.
-    static_exit_frames: int = 36
+    # Generous on purpose: a packer resting a hand in the box for a second or
+    # two is normal, and on a small box a hand can fill the whole interior so
+    # little frame-to-frame motion is measurable. A queued box sits there for
+    # minutes, so waiting 10 s to conclude "this is furniture" costs nothing.
+    static_exit_frames: int = 300
     max_visit_frames: int = 300       # hard backstop for a stuck visit
     # -- insertion confirmation (inside the box) --
     interior_inset_frac: float = 0.12 # shrink bbox by this to get the interior

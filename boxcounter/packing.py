@@ -271,8 +271,13 @@ class PackingMonitor:
         # The box must still be there. If the "visit" was really the box being
         # pushed/dragged out while occluded, no track overlaps the frozen bbox
         # at visit end and no piece may be awarded.
+        # Containment, not IoU: a visit often ends while the arm is still merged
+        # with the box, and that blob CONTAINS the frozen bbox — its IoU falls
+        # with the arm's size, so a small box would read as "gone" (and lose the
+        # piece) purely because the arm dwarfs it. A departing box, occluded or
+        # not, stops covering the frozen spot, which is what this must catch.
         box_present = tracks is None or any(
-            tr.misses == 0 and _iou(tr.bbox, s.bbox) > _REBIND_IOU for tr in tracks)
+            tr.misses == 0 and _coverage(tr.bbox, s.bbox) > 0.5 for tr in tracks)
         changed = True
         if cfg.appearance_check and gray is not None and self._idle_interior is not None:
             cur = cv2.GaussianBlur(self._interior_crop(gray), (5, 5), 0)
@@ -321,8 +326,18 @@ class PackingMonitor:
         motion = self._interior_motion(gray)
 
         if not self._hand_in:
-            # Track the empty-scene baseline only while the arm is out.
-            self._ring_baseline += _BASELINE_ALPHA * (ring - self._ring_baseline)
+            # Track the empty-scene baseline only while the arm is out. It
+            # rises SLOWLY (so a genuinely new static occupant, such as the
+            # next box queued into the band, is absorbed over a second or so)
+            # but falls IMMEDIATELY when the band clears. Without the fast
+            # fall, anything folded into the baseline while it was still in
+            # the band — in particular the arm itself, via the static-occupant
+            # branch below — would keep the baseline high for tens of frames
+            # and swallow the following reaches.
+            if ring < self._ring_baseline:
+                self._ring_baseline = ring
+            else:
+                self._ring_baseline += _BASELINE_ALPHA * (ring - self._ring_baseline)
             if self._idle_interior is None:
                 self._idle_interior = cv2.GaussianBlur(self._interior_crop(gray), (5, 5), 0)
             if signal > cfg.arm_enter_frac:
