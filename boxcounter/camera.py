@@ -40,6 +40,29 @@ class FrameSource:
         pass
 
 
+def flicker_safe_exposure(exposure_us: float, gain: float, mains_hz: int,
+                          frame_us: float) -> tuple:
+    """Round an exposure to a whole number of lighting flicker periods.
+
+    Mains-powered LED and fluorescent lights flicker at twice the mains
+    frequency. An exposure that is not a multiple of that period catches a
+    different slice of each flicker in every row, which shows up as bands
+    rolling through the picture — and the counter would see those bands as
+    movement everywhere. The analogue gain is adjusted to keep the picture
+    as bright as before."""
+    period = 1e6 / (2 * mains_hz)
+    if exposure_us < 0.75 * period:
+        # Very bright scene: stretching the exposure to a full period would
+        # overexpose it, and the gain cannot go below 1. Leave it alone.
+        return int(exposure_us), float(gain)
+    n = max(1, int(round(exposure_us / period)))
+    while n > 1 and n * period > frame_us:
+        n -= 1                     # must still fit in one frame time
+    new_exp = n * period
+    new_gain = max(1.0, float(gain) * float(exposure_us) / new_exp)
+    return int(round(new_exp)), round(new_gain, 3)
+
+
 class PiCameraSource(FrameSource):
     """IMX219 (or any CSI camera) via Picamera2/libcamera.
 
@@ -71,6 +94,7 @@ class PiCameraSource(FrameSource):
             kwargs["raw"] = {"size": tuple(cfg.sensor_size)}
         video_config = self.picam2.create_video_configuration(**kwargs)
         self.picam2.configure(video_config)
+        self._set_flicker_avoidance()
         self.picam2.start()
         log.info("Picamera2 started: %dx%d @ %d fps (sensor %s)",
                  cfg.width, cfg.height, cfg.fps, cfg.sensor_size)
@@ -107,11 +131,38 @@ class PiCameraSource(FrameSource):
                 controls["ExposureTime"] = md["ExposureTime"]
             if "AnalogueGain" in md:
                 controls["AnalogueGain"] = md["AnalogueGain"]
+            if cfg.flicker_hz and "ExposureTime" in controls:
+                exp, gain = flicker_safe_exposure(
+                    controls["ExposureTime"], controls.get("AnalogueGain", 1.0),
+                    cfg.flicker_hz, 1e6 / max(1, cfg.fps))
+                controls["ExposureTime"] = exp
+                controls["AnalogueGain"] = gain
             if "ColourGains" in md:
                 controls["ColourGains"] = md["ColourGains"]
             self.picam2.set_controls(controls)
             log.info("Locked exposure: %s us, gain %.2f",
                      controls.get("ExposureTime", "?"), controls.get("AnalogueGain", 0.0))
+
+    def _set_flicker_avoidance(self) -> None:
+        """Ask the auto-exposure to keep exposures a whole number of light
+        flicker periods long (supported by recent libcamera versions; older
+        ones are covered by rounding the locked exposure, see
+        flicker_safe_exposure)."""
+        hz = self.cfg.flicker_hz
+        if not hz:
+            return
+        try:
+            if "AeFlickerMode" not in self.picam2.camera_controls:
+                return
+            from libcamera import controls as lc
+            self.picam2.set_controls({
+                "AeFlickerMode": lc.AeFlickerModeEnum.Manual,
+                "AeFlickerPeriod": int(round(1e6 / (2 * hz))),
+            })
+            log.info("Flicker avoidance on for %d Hz mains lighting", hz)
+        except Exception:
+            log.info("Camera does not support flicker avoidance; the locked "
+                     "exposure is rounded instead")
 
     def read(self) -> Optional[np.ndarray]:
         try:

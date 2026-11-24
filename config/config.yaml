@@ -1,5 +1,6 @@
 # ============================================================================
 # Box counter configuration — Raspberry Pi 5 (2 GB) + IMX219 CSI camera
+# Counts boxes, the pads put in each box, and the time to pack each box.
 # ============================================================================
 # Geometry values (roi, line_position, *_frac) are FRACTIONS of the frame,
 # so this file keeps working if you change the capture resolution.
@@ -20,6 +21,9 @@ camera:
   lock_exposure: true         # then freeze it — REQUIRED for stable detection
   exposure_time_us: 0         # >0 = fully manual exposure (microseconds)
   analogue_gain: 0.0          # >0 = fixed gain, used with exposure_time_us
+  flicker_hz: 60              # mains frequency of the lights: 60 in the US,
+                              # 50 in Europe; 0 = ignore. Keeps LED/tube
+                              # flicker from showing as moving bands
 
 processing:
   # Region of interest [x, y, w, h] as fractions: crop to the belt surface so
@@ -91,6 +95,17 @@ tracking:
   min_hits: 3                 # detections needed before a box may be counted
 
 counting:
+  # How boxes are counted:
+  #   station  = boxes STOP at the packing spot in front of the paper
+  #              machine, get filled, and leave (slid either way along the
+  #              rollers, or lifted off). Counted when they leave. Pads and
+  #              pack time per box. Set it up with: python3 tools/station_setup.py
+  #              -> settings in the "station:" section below
+  #   conveyor = boxes pass a counting line without stopping (the settings
+  #              right below, and "packing:" further down)
+  mode: station
+
+  # --- conveyor mode only ---
   axis: y                     # belt travel axis in the image: y = vertical
   line_position: 0.78         # counting line at 78% of frame height — past
                               # the packing zone, so boxes are counted AFTER
@@ -101,7 +116,41 @@ counting:
                               # negative = upward/leftward, any = both
   min_travel_frac: 0.10       # must have moved 10% of the frame to count
 
+station:
+  # --- counting.mode: station -------------------------------------------
+  # Measured for your box by:  python3 tools/station_setup.py
+  # (it fills in zone / min_box_frac / max_box_frac / box_color).
+  zone: [0.15, 0.10, 0.70, 0.80]  # where the box stands while it is packed
+                              # [x, y, w, h] fractions of the picture; a box
+                              # counts only with its CENTRE inside, so boxes
+                              # queued beside the spot are ignored
+  min_box_frac: 0.06          # smallest box, fraction of the picture. Hands,
+  max_box_frac: 0.95          # arms and the hanging pad are smaller than this
+  box_color: brown            # brown = must look like cardboard (keeps dark
+                              # sleeves and other objects out); any = no check
+  count_pads: true            # count pads per reach into the box
+  # A REACH: movement over the box, then the box quiet again for
+  # quiet_seconds. If enough of the inside of the box looks different
+  # afterwards (pad_min_change), a pad went in.
+  quiet_seconds: 0.5          # pads counted TOO LOW (two pads merge into one)
+                              #   -> lower this a little (0.4)
+                              # pads counted TOO HIGH (one pad counts twice)
+                              #   -> raise it (0.7)
+  pad_min_change: 0.06        # share of the box that must change for a pad.
+                              # Empty-handed reaches counted -> raise (0.10);
+                              # real pads missed -> lower (0.04)
+  pieces_per_visit: 1         # pads per reach, if they go in fixed bundles
+  expected_pieces: 0          # e.g. 4 = warn when a box leaves with a
+                              # different count; 0 = no check
+  min_pack_seconds: 3.0       # shorter stays at the spot are not boxes
+  confirm_seconds: 0.6        # how long a box must stand still to be seen
+  depart_seconds: 0.4         # spot empty this long = the box has left
+  # Every reach and its decision is written to data/boxcounter.log, e.g.
+  #   "Box 4 reach 2: 23% of the box changed (pad needs 6%) -> +1 pad"
+  # which is what to look at when tuning the two numbers above.
+
 packing:
+  # --- counting.mode: conveyor only ---------------------------------------
   enabled: true               # count pieces placed into each box + pack time.
                               # false = plain pass-through box counter
   # Zone [x, y, w, h] (fractions) where boxes stop to be packed. Keep it

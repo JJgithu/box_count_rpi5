@@ -1,5 +1,11 @@
 # Calibration — Hyper-Detailed, Step by Step
 
+> **Using the default packing-station mode (`counting.mode: station`)?**
+> Its whole setup is one command — `python3 tools/station_setup.py` (two
+> pictures: the empty spot, then an empty box on it). See
+> [STATION.md](STATION.md). **This document is for `counting.mode: conveyor`**
+> (boxes counted as they cross a line).
+
 This is the procedure for taking a freshly installed system that counts
 nothing and turning it into one that counts every box, every pad, and every
 pack time correctly.

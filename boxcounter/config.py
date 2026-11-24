@@ -40,6 +40,11 @@ class CameraConfig:
     # Manual exposure overrides (0 = keep auto, then lock if lock_exposure).
     exposure_time_us: int = 0
     analogue_gain: float = 0.0
+    # Mains frequency of the lighting (60 in the Americas, 50 in most other
+    # places; 0 = ignore). LED and fluorescent lights flicker at twice this
+    # rate; an exposure that is not a whole number of flicker periods shows
+    # moving bands that read as "motion" everywhere in the picture.
+    flicker_hz: int = 0
 
 
 @dataclass
@@ -102,6 +107,10 @@ class TrackingConfig:
 
 @dataclass
 class CountingConfig:
+    # station  = boxes stop at a packing spot, get filled, and leave (any
+    #            direction). Counted when they leave. See StationConfig.
+    # conveyor = boxes pass a counting line (axis/line/direction below).
+    mode: str = "station"
     axis: str = "y"                   # travel axis in the image: x | y
     line_position: float = 0.55       # line coordinate as fraction of frame
     hysteresis_frac: float = 0.03     # dead band around the line
@@ -167,6 +176,71 @@ class PackingConfig:
 
 
 @dataclass
+class StationConfig:
+    """Packing station (counting.mode: station).
+
+    A box stops in front of the paper machine, the packer fills it, and it
+    leaves — sliding either way along the rollers, or lifted off. A box is
+    something that differs from the empty spot, stays perfectly still (hands
+    never do), is big enough and cardboard-coloured, and sits in the zone.
+    It is counted when it leaves; pads are counted per reach into it.
+    """
+    # Where the box sits while it is packed, [x, y, w, h] fractions of the
+    # frame. A box is only accepted with its centre inside this rectangle, so
+    # boxes queued beside the spot are ignored. tools/station_setup.py
+    # measures the real spot.
+    zone: List[float] = field(default_factory=lambda: [0.15, 0.10, 0.70, 0.80])
+    work_width: int = 320             # analysis resolution (pixels wide)
+    learn_frames: int = 20            # frames averaged into the empty-spot image
+    # -- what is a box -----------------------------------------------------
+    min_box_frac: float = 0.06        # smallest box, fraction of the ROI area
+    max_box_frac: float = 0.95        # largest box
+    box_color: str = "brown"          # brown = must look like cardboard | any
+    min_brown_frac: float = 0.35      # share of the box that must look brown
+    diff_threshold: int = 30          # colour change (0-255) = "not the empty spot"
+    suppress_shadows: bool = True     # a shadow on the rollers is not a box
+    motion_threshold: int = 14        # frame-to-frame change (0-255) = movement
+    still_seconds: float = 0.5        # unchanged this long = "still"
+    confirm_seconds: float = 0.6      # a still box must stay this long
+    # An arm resting on the rollers touches the picture edge with a narrow
+    # wrist/forearm; a box touching the edge does so along a whole side.
+    # Contact length / sqrt(area) below this = arm-like, rejected.
+    arm_contact_ratio: float = 0.35
+    # -- when has the box left ---------------------------------------------
+    present_cover: float = 0.45       # share of the box's spot still covered = there
+    depart_cover: float = 0.25        # below this ...
+    depart_seconds: float = 0.4       # ... for this long = it left
+    min_pack_seconds: float = 3.0     # shorter visits are not counted as boxes
+    max_session_seconds: float = 1800.0  # give up on a "box" after 30 min
+    # -- pads ----------------------------------------------------------------
+    count_pads: bool = True
+    # A reach starts when this share of the box shows movement ...
+    reach_start_motion: float = 0.03
+    # ... and ends after the box has been nearly still (below
+    # reach_end_motion) for quiet_seconds.
+    reach_end_motion: float = 0.02
+    quiet_seconds: float = 0.5
+    max_reach_seconds: float = 120.0
+    # After the hand leaves, this share of the inside of the box must look
+    # different than before the reach for it to count as a pad.
+    pad_min_change: float = 0.06
+    change_threshold: int = 28        # brightness change (0-255) per pixel
+    interior_inset_frac: float = 0.12 # ignore the flaps and rim: this much
+                                      # of the box's size, in from its outline
+    pieces_per_visit: int = 1         # pads per reach (fixed bundles = N)
+    expected_pieces: int = 0          # warn when a box leaves with a different
+                                      # count; 0 = no check
+    # -- background upkeep -------------------------------------------------
+    # Something that sits still this long without being a box (a dropped
+    # pad, the pad hanging from the machine, a tape gun) becomes part of the
+    # empty-spot picture.
+    absorb_seconds: float = 5.0
+    # Most of the picture changed for this long (lights switched, camera
+    # bumped): re-learn the empty spot.
+    relearn_seconds: float = 8.0
+
+
+@dataclass
 class OutputConfig:
     data_dir: str = "data"
     sqlite: bool = True
@@ -198,6 +272,7 @@ class AppConfig:
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     counting: CountingConfig = field(default_factory=CountingConfig)
     packing: PackingConfig = field(default_factory=PackingConfig)
+    station: StationConfig = field(default_factory=StationConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     gpio: GpioConfig = field(default_factory=GpioConfig)
     web: WebConfig = field(default_factory=WebConfig)
@@ -249,6 +324,39 @@ def _validate(cfg: AppConfig) -> None:
             "with 'python3 tools/wizard.py --geometry' if the count looks "
             "wrong.",
             cfg.processing.min_area_frac, cfg.processing.min_area_frac * 100)
+
+    if cfg.camera.flicker_hz not in (0, 50, 60):
+        errors.append(f"camera.flicker_hz must be 0, 50 or 60, got {cfg.camera.flicker_hz}")
+
+    if cfg.counting.mode not in ("station", "conveyor"):
+        errors.append(f"counting.mode must be station|conveyor, got '{cfg.counting.mode}'")
+    st = cfg.station
+    zone = st.zone
+    if len(zone) != 4 or not all(isinstance(v, (int, float)) for v in zone):
+        errors.append("station.zone must be [x, y, w, h] fractions")
+    else:
+        x, y, w, h = zone
+        if not (0.0 <= x < 1.0 and 0.0 <= y < 1.0 and 0.0 < w <= 1.0 and 0.0 < h <= 1.0
+                and x + w <= 1.0 + 1e-9 and y + h <= 1.0 + 1e-9):
+            errors.append(f"station.zone {zone} out of bounds (fractions of frame)")
+    if not (0.0 < st.min_box_frac < st.max_box_frac <= 1.0):
+        errors.append("station: need 0 < min_box_frac < max_box_frac <= 1")
+    if st.box_color not in ("brown", "any"):
+        errors.append(f"station.box_color must be brown|any, got '{st.box_color}'")
+    if not (0.0 < st.depart_cover < st.present_cover <= 1.0):
+        errors.append("station: need 0 < depart_cover < present_cover <= 1")
+    if not (0.0 < st.reach_end_motion < st.reach_start_motion < 1.0):
+        errors.append("station: need 0 < reach_end_motion < reach_start_motion < 1")
+    if st.work_width < 80:
+        errors.append("station.work_width must be >= 80")
+    if st.learn_frames < 1:
+        errors.append("station.learn_frames must be >= 1")
+    if st.pieces_per_visit < 1:
+        errors.append("station.pieces_per_visit must be >= 1")
+    for name in ("still_seconds", "confirm_seconds", "depart_seconds",
+                 "quiet_seconds", "absorb_seconds", "relearn_seconds"):
+        if getattr(st, name) <= 0:
+            errors.append(f"station.{name} must be > 0")
 
     if cfg.counting.axis not in ("x", "y"):
         errors.append(f"counting.axis must be x|y, got '{cfg.counting.axis}'")
@@ -315,6 +423,7 @@ def load_config(path: str | Path) -> AppConfig:
         tracking=_build(TrackingConfig, raw.get("tracking"), "tracking"),
         counting=_build(CountingConfig, raw.get("counting"), "counting"),
         packing=_build(PackingConfig, raw.get("packing"), "packing"),
+        station=_build(StationConfig, raw.get("station"), "station"),
         output=_build(OutputConfig, raw.get("output"), "output"),
         gpio=_build(GpioConfig, raw.get("gpio"), "gpio"),
         web=_build(WebConfig, raw.get("web"), "web"),

@@ -1,4 +1,11 @@
-"""Main processing loop: capture -> detect -> track -> count -> record."""
+"""Main processing loop: capture -> detect -> count -> record.
+
+Two counting modes (counting.mode):
+  station  - boxes stop at a packing spot, get filled, and leave; counted when
+             they leave (boxcounter/station.py). Pads and pack time included.
+  conveyor - boxes pass a counting line (detector -> tracker -> line counter,
+             with the optional packing monitor attached).
+"""
 
 from __future__ import annotations
 
@@ -13,13 +20,14 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from .annotate import draw_overlay, mask_to_bgr
+from .annotate import draw_overlay, draw_station_overlay, mask_to_bgr
 from .camera import FrameSource, create_source
 from .config import AppConfig
 from .counter import LineCounter
 from .detector import BoxDetector
 from .gpio_out import GpioPulse
 from .packing import PackingMonitor
+from .station import StationMonitor
 from .status import StatusDisplay, supported as status_supported
 from .storage import CountStore
 from .tracker import CentroidTracker
@@ -57,8 +65,12 @@ class Pipeline:
                  display: bool = False,
                  enable_web: Optional[bool] = None,
                  max_frames: Optional[int] = None,
-                 status: Optional[bool] = None):
+                 status: Optional[bool] = None,
+                 record_path: Optional[str] = None):
         self.cfg = cfg
+        self.mode = cfg.counting.mode
+        self.record_path = record_path
+        self._writer = None
         self.source = source or create_source(cfg.camera, video_override)
         self.display = display
         self.max_frames = max_frames
@@ -69,6 +81,7 @@ class Pipeline:
         self.tracker: Optional[CentroidTracker] = None    # built on first frame
         self.counter: Optional[LineCounter] = None        # (needs frame size)
         self.packing: Optional[PackingMonitor] = None     # (needs frame size)
+        self.station: Optional[StationMonitor] = None     # (needs frame size)
         self._pack_history: deque = deque(maxlen=50)      # (pieces, pack_s)
 
         self.store = CountStore(cfg.output.data_dir,
@@ -100,7 +113,7 @@ class Pipeline:
             self.status = StatusDisplay(
                 csv_path=str(self.store.csv_path_for(time.time()))
                 if cfg.output.csv else "",
-                packing=cfg.packing.enabled)
+                packing=self._counts_pads)
 
     # -- control ---------------------------------------------------------
 
@@ -114,6 +127,12 @@ class Pipeline:
     def install_signal_handlers(self) -> None:
         signal.signal(signal.SIGINT, self.request_stop)
         signal.signal(signal.SIGTERM, self.request_stop)
+
+    @property
+    def _counts_pads(self) -> bool:
+        if self.mode == "station":
+            return self.cfg.station.count_pads
+        return self.cfg.packing.enabled
 
     # -- geometry --------------------------------------------------------
 
@@ -157,6 +176,8 @@ class Pipeline:
             self.tracker.tracks.clear()
         if self.packing is not None:
             self.packing.reset()
+        if self.station is not None:
+            self.station.reset()
 
     # -- stats -----------------------------------------------------------
 
@@ -181,18 +202,102 @@ class Pipeline:
             "avg_pieces": round(avg_pieces, 1) if avg_pieces is not None else None,
             "avg_pack_seconds": round(avg_pack, 1) if avg_pack is not None else None,
         }
-        if self.packing is not None:
-            s["packing"] = True
+        s["mode"] = self.mode
+        if self.packing is not None or self.station is not None:
+            s["packing"] = self._counts_pads
             s["pieces_total"] = self.pieces_total
-            s["expected_pieces"] = self.cfg.packing.expected_pieces or None
+            expected = (self.cfg.station.expected_pieces if self.mode == "station"
+                        else self.cfg.packing.expected_pieces)
+            s["expected_pieces"] = expected or None
             # legacy keys kept for the dashboard
             s["avg_pack_s"] = s["avg_pack_seconds"]
-            hist = [p for p in self._pack_history if p[0] is not None]
+            hist = [p for p in self._pack_history if p[1] is not None]
             if hist:
                 s["last_pieces"] = hist[-1][0]
                 s["last_pack_s"] = hist[-1][1]
-            s.update(self.packing.live_stats(self._media_time()))
+            if self.station is not None:
+                s.update(self.station.live_stats())
+            else:
+                s.update(self.packing.live_stats(self._media_time()))
         return s
+
+    def _record_event(self, ev) -> None:
+        """Book one counted box: totals, database/CSV, GPIO, screen."""
+        self.total += 1
+        self.session_count += 1
+        self._event_times.append(ev.ts)
+        if ev.pieces is not None:
+            self.pieces_total += ev.pieces
+        if self.station is not None or self.packing is not None:
+            self._pack_history.append((ev.pieces, ev.pack_seconds))
+        ev.box_number = self.total
+        self.store.record(ev)
+        self.gpio.pulse()
+        self._summary = self.store.summary()
+        if self.status is not None:
+            self.status.add_box(self.total, ev.pieces, ev.pack_seconds, ev.ts)
+        elif ev.pieces is not None:
+            log.info("BOX #%d — %d pads, packed in %.1f s",
+                     self.total, ev.pieces, ev.pack_seconds or 0.0)
+        elif ev.pack_seconds is not None:
+            log.info("BOX #%d — packed in %.1f s", self.total, ev.pack_seconds)
+        else:
+            log.info("BOX #%d (track %d, %dx%d px)",
+                     self.total, ev.track_id, ev.bbox[2], ev.bbox[3])
+
+    def _record_frame(self, frame) -> None:
+        """--record: keep the raw camera picture for replaying later."""
+        if self.record_path is None:
+            return
+        if self._writer is None:
+            from pathlib import Path
+            Path(self.record_path).parent.mkdir(parents=True, exist_ok=True)
+            fh, fw = frame.shape[:2]
+            self._writer = cv2.VideoWriter(
+                self.record_path, cv2.VideoWriter_fourcc(*"mp4v"),
+                float(self.cfg.camera.fps), (fw, fh))
+            if not self._writer.isOpened():
+                log.error("Cannot record to %s", self.record_path)
+                self.record_path = None
+                self._writer = None
+                return
+            log.info("Recording raw video to %s", self.record_path)
+        self._writer.write(frame)
+
+    def _station_step(self, frame, frame_idx: int):
+        """One frame in station mode. Returns (events, annotated, debug)."""
+        if self.station is None:
+            self.station = StationMonitor(self.cfg.station, self.cfg.processing.roi,
+                                          frame.shape[:2],
+                                          debug=self.web is not None or self.display)
+            log.info("Station mode: packing zone %s, analysis %dx%d",
+                     self.cfg.station.zone, self.station.ww, self.station.wh)
+        try:
+            events = self.station.update(frame, self._media_time())
+        except Exception:
+            # A bug in one frame's analysis must never stop the counter.
+            log.exception("Station analysis failed this frame; continuing")
+            events = []
+        return events
+
+    def _handle_reset(self) -> None:
+        if self._reset_requested:
+            self._reset_requested = False
+            self.store.reset()
+            self.total = 0
+            self.pieces_total = 0
+            self._pack_history.clear()
+            self._summary = self.store.summary()
+
+    def _tick_fps(self) -> float:
+        """Update the fps estimate (exponential moving average); returns now."""
+        now = time.monotonic()
+        dt = now - self._fps_clock
+        self._fps_clock = now
+        if dt > 0:
+            inst = 1.0 / dt
+            self._fps = inst if self._fps == 0 else 0.9 * self._fps + 0.1 * inst
+        return now
 
     # -- main loop -------------------------------------------------------
 
@@ -205,7 +310,7 @@ class Pipeline:
         frame_idx = 0
         failures = 0
         last_heartbeat = time.monotonic()
-        fps_clock = time.monotonic()
+        self._fps_clock = time.monotonic()
         wd_clock = 0.0
         _sd_notify("READY=1")           # tell systemd startup is complete
         log.info("Pipeline running (resumed total: %d)", self.total)
@@ -240,6 +345,38 @@ class Pipeline:
                     break  # video file ended
                 failures = 0
                 frame_idx += 1
+                self._record_frame(frame)
+
+                if self.mode == "station":
+                    for ev in self._station_step(frame, frame_idx):
+                        self._record_event(ev)
+                    self._handle_reset()
+                    now = self._tick_fps()
+                    annotated = draw_station_overlay(
+                        frame, self.station.overlay(), self.total, self._fps,
+                        self._rate_per_min(), self.station.state_text())
+                    stats = self._stats()
+                    debug = self.station.debug_view() if (self.web or self.display) else None
+                    self.state.update(annotated, debug, stats)
+                    if self.status is not None:
+                        self.status.draw(stats)
+                    if self.display:
+                        cv2.imshow("boxcounter", annotated)
+                        if debug is not None:
+                            cv2.imshow("what the counter sees", debug)
+                        if cv2.waitKey(1) & 0xFF == ord("q"):
+                            break
+                    if now - last_heartbeat >= cfg.output.heartbeat_seconds:
+                        last_heartbeat = now
+                        if self.status is None:
+                            log.info("heartbeat: total=%d fps=%.1f — %s", self.total,
+                                     self._fps, self.station.state_text())
+                    if now - wd_clock >= 1.0:
+                        wd_clock = now
+                        _sd_notify("WATCHDOG=1")
+                    if self.max_frames and frame_idx >= self.max_frames:
+                        break
+                    continue
 
                 detections, mask = self.detector.process(frame)
                 if self.detector.relearned:
@@ -272,9 +409,6 @@ class Pipeline:
                 if frame_idx > cfg.processing.warmup_frames:
                     events = self.counter.update(tracks)
                 for ev in events:
-                    self.total += 1
-                    self.session_count += 1
-                    self._event_times.append(ev.ts)
                     if self.packing is not None:
                         try:
                             session = self.packing.claim_for_track(ev.track_id, media_t)
@@ -284,39 +418,10 @@ class Pipeline:
                         if session is not None:
                             ev.pieces = session.pieces
                             ev.pack_seconds = session.pack_seconds
-                            self.pieces_total += session.pieces
-                        self._pack_history.append((ev.pieces, ev.pack_seconds))
-                    ev.box_number = self.total
-                    self.store.record(ev)
-                    self.gpio.pulse()
-                    self._summary = self.store.summary()
-                    if self.status is not None:
-                        self.status.add_box(self.total, ev.pieces,
-                                            ev.pack_seconds, ev.ts)
-                    elif ev.pieces is not None:
-                        log.info("BOX #%d (track %d, %dx%d px) — %d pads, "
-                                 "packed in %.1f s",
-                                 self.total, ev.track_id, ev.bbox[2], ev.bbox[3],
-                                 ev.pieces, ev.pack_seconds or 0.0)
-                    else:
-                        log.info("BOX #%d (track %d, %dx%d px)",
-                                 self.total, ev.track_id, ev.bbox[2], ev.bbox[3])
+                    self._record_event(ev)
 
-                if self._reset_requested:
-                    self._reset_requested = False
-                    self.store.reset()
-                    self.total = 0
-                    self.pieces_total = 0
-                    self._pack_history.clear()
-                    self._summary = self.store.summary()
-
-                # fps (exponential moving average)
-                now = time.monotonic()
-                dt = now - fps_clock
-                fps_clock = now
-                if dt > 0:
-                    inst = 1.0 / dt
-                    self._fps = inst if self._fps == 0 else 0.9 * self._fps + 0.1 * inst
+                self._handle_reset()
+                now = self._tick_fps()
 
                 pack_overlay = None
                 if self.packing is not None:
@@ -365,12 +470,16 @@ class Pipeline:
             if self.status is not None:
                 self.status.stop()
             self.source.stop()
+            if self._writer is not None:
+                self._writer.release()
+                log.info("Recording saved: %s", self.record_path)
             self.store.close()
             self.gpio.close()
             if self.display:
                 cv2.destroyAllWindows()
 
         summary = {"frames": frame_idx, "total": self.total,
-                   "session": self.session_count, "fps": round(self._fps, 1)}
+                   "session": self.session_count, "fps": round(self._fps, 1),
+                   "recording": self.record_path if self._writer is not None else None}
         log.info("Pipeline stopped: %s", summary)
         return summary

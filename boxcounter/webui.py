@@ -88,13 +88,15 @@ _PAGE = """<!doctype html>
       <div class="metric"><span class="label">camera fps</span><b id="fps">&ndash;</b></div>
       <div class="metric"><span class="label">uptime</span><b id="uptime">&ndash;</b></div>
     </div>
+    <div id="statenow" style="margin-top:10px;color:#7fd1b9;font-size:14px"></div>
+    <div id="notenow" style="margin-top:2px;color:#9aa4b0;font-size:13px"></div>
     <div id="packcard" style="display:none">
       <div class="label" style="margin-top:16px">Packing</div>
       <div class="metrics">
-        <div class="metric"><span class="label">pieces total</span><b id="pieces">&ndash;</b></div>
+        <div class="metric"><span class="label">pads total</span><b id="pieces">&ndash;</b></div>
         <div class="metric"><span class="label">last box</span><b id="lastbox">&ndash;</b></div>
         <div class="metric"><span class="label">avg pack</span><b id="avgpack">&ndash;</b></div>
-        <div class="metric"><span class="label">avg pcs/box</span><b id="avgpcs">&ndash;</b></div>
+        <div class="metric"><span class="label">avg pads/box</span><b id="avgpcs">&ndash;</b></div>
       </div>
       <div id="packnow" style="margin-top:8px;color:#f0b429;font-size:14px"></div>
     </div>
@@ -128,22 +130,26 @@ async function tick() {
     document.getElementById('fps').textContent = s.fps.toFixed(1);
     document.getElementById('uptime').textContent = fmtUp(s.uptime_s);
     document.getElementById('status').textContent = 'live';
+    document.getElementById('statenow').textContent =
+      s.station_state ? 'now: ' + s.station_state : '';
+    document.getElementById('notenow').textContent =
+      s.station_note ? 'last: ' + s.station_note : '';
     const packing = !!s.packing;
     document.getElementById('packcard').style.display = packing ? '' : 'none';
     if (packing) {
       document.getElementById('pieces').textContent = s.pieces_total ?? 0;
       document.getElementById('lastbox').textContent =
-        s.last_pieces != null ? `${s.last_pieces} pcs / ${(s.last_pack_s ?? 0).toFixed(1)}s` : '–';
+        s.last_pieces != null ? `${s.last_pieces} pads / ${(s.last_pack_s ?? 0).toFixed(1)}s` : '–';
       document.getElementById('avgpack').textContent =
         s.avg_pack_s != null ? s.avg_pack_s.toFixed(1) + 's' : '–';
       document.getElementById('avgpcs').textContent = s.avg_pieces ?? '–';
-      document.getElementById('packnow').textContent = s.packing_now
-        ? `packing now: ${s.current_pieces} pcs, ${s.current_elapsed_s}s` +
+      document.getElementById('packnow').textContent = (s.packing_now && !s.station_state)
+        ? `packing now: ${s.current_pieces} pads, ${s.current_elapsed_s}s` +
           (s.hand_in ? ' — hand in box' : '')
         : '';
     }
     const head = packing
-      ? '<tr><th>time</th><th>track</th><th>size</th><th>pcs</th><th>pack</th></tr>'
+      ? '<tr><th>time</th><th>track</th><th>size</th><th>pads</th><th>pack</th></tr>'
       : '<tr><th>time</th><th>track</th><th>size</th></tr>';
     const rows = [head];
     for (const e of s.recent || []) {

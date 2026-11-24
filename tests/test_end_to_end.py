@@ -20,6 +20,7 @@ from boxcounter.pipeline import Pipeline              # noqa: E402
 
 def run_pipeline_on(video_path: str, data_dir: str) -> dict:
     cfg = AppConfig()
+    cfg.counting.mode = "conveyor"   # these tests exercise the line counter
     cfg.camera.source = "video"
     cfg.camera.video_path = video_path
     cfg.processing.roi = [0.0, 0.0, 1.0, 1.0]

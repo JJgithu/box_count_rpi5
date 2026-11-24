@@ -1,4 +1,4 @@
-# Implementation Guide — Conveyor Box Counter on Raspberry Pi 5
+# Implementation Guide — Box, Pad and Pack-Time Counter on Raspberry Pi 5
 
 This is the complete, ordered walkthrough from empty SD card to a box counter
 running unattended at every boot. Allow ~2 hours for first deployment
@@ -141,6 +141,13 @@ compilation — and installs (but does not yet enable) the systemd service.
 > network forever.
 
 ## 5. Calibration
+
+> **Packing station (default mode, `counting.mode: station`)** — a box stops
+> in front of the paper machine, is filled, and leaves: the whole calibration
+> is `python3 tools/station_setup.py` (a picture of the empty spot, then one
+> with an empty box on it). Details, tuning and what the screen shows:
+> [STATION.md](STATION.md). The rest of this section is for
+> `counting.mode: conveyor`.
 
 All tuning lives in one file: **`config/config.yaml`** (heavily commented).
 Details in [CALIBRATION.md](CALIBRATION.md). The short version:

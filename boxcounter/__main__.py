@@ -129,6 +129,44 @@ def _reset_count(cfg) -> int:
     return 0
 
 
+def _counts_pads(cfg) -> bool:
+    if cfg.counting.mode == "station":
+        return cfg.station.count_pads
+    return cfg.packing.enabled
+
+
+def _setup_logging(level: str, use_status: bool, data_dir: str) -> str:
+    """Console logging (quiet while the live panel owns the screen) plus a
+    rotating log file that always records INFO — every box, every reach and
+    why it did or did not count a pad — so a miscount can be explained after
+    the fact without re-running anything."""
+    from logging.handlers import RotatingFileHandler
+
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG if level == "DEBUG" else logging.INFO)
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s",
+                            datefmt="%H:%M:%S")
+    console = logging.StreamHandler()
+    # The panel owns the screen; routine INFO chatter would corrupt it.
+    console.setLevel(logging.WARNING if use_status
+                     else getattr(logging, level, logging.INFO))
+    console.setFormatter(fmt)
+    root.addHandler(console)
+    path = ""
+    try:
+        Path(data_dir).mkdir(parents=True, exist_ok=True)
+        path = str(Path(data_dir) / "boxcounter.log")
+        fh = RotatingFileHandler(path, maxBytes=2_000_000, backupCount=3)
+        fh.setLevel(logging.DEBUG if level == "DEBUG" else logging.INFO)
+        fh.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S"))
+        root.addHandler(fh)
+    except OSError:
+        path = ""
+    return path
+
+
 def _print_totals(cfg) -> int:
     from .storage import CountStore
 
@@ -140,7 +178,7 @@ def _print_totals(cfg) -> int:
     finally:
         store.close()
     print(f"Boxes counted        : {s['total']}")
-    if cfg.packing.enabled:
+    if _counts_pads(cfg):
         print(f"Pads counted (total) : {s['pieces_total']}")
         avg_p = s["avg_pieces"]
         avg_t = s["avg_pack_seconds"]
@@ -162,7 +200,8 @@ def _print_totals(cfg) -> int:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="boxcounter",
-        description="Offline conveyor box counter for Raspberry Pi 5 + IMX219")
+        description="Offline box, pad and pack-time counter for Raspberry Pi 5 "
+                    "+ IMX219 (packing station or conveyor)")
     parser.add_argument("--config", "-c", default="config/config.yaml",
                         help="path to YAML config (default: config/config.yaml)")
     parser.add_argument("--source", help="override input with a video file (testing)")
@@ -183,6 +222,10 @@ def main(argv=None) -> int:
                              "(history is kept in the database and CSVs)")
     parser.add_argument("--total", action="store_true",
                         help="print the current totals, then exit")
+    parser.add_argument("--record", nargs="?", const="auto", metavar="FILE.mp4",
+                        help="also save the raw camera video while counting "
+                             "(default file: data/recordings/clip_<date>_<time>.mp4); "
+                             "replay it later with --source")
     args = parser.parse_args(argv)
 
     rc = _check_core_deps()
@@ -211,10 +254,20 @@ def main(argv=None) -> int:
         print(f"Config OK: {cfg_path}")
         print(f"  camera   : {args.source or cfg.camera.source} "
               f"{cfg.camera.width}x{cfg.camera.height} @ {cfg.camera.fps} fps")
-        print(f"  counting : axis={cfg.counting.axis} "
-              f"line={cfg.counting.line_position} dir={cfg.counting.direction}")
-        print(f"  packing  : {'on' if cfg.packing.enabled else 'off'}"
-              + (f", zone={cfg.packing.zone}" if cfg.packing.enabled else ""))
+        if cfg.counting.mode == "station":
+            st = cfg.station
+            print(f"  counting : station — a box is counted when it leaves "
+                  f"the packing spot")
+            print(f"  zone     : {st.zone}  (box size {st.min_box_frac:.0%}"
+                  f"-{st.max_box_frac:.0%} of the view, colour: {st.box_color})")
+            print(f"  pads     : {'counted per reach' if st.count_pads else 'off'}"
+                  + (f" (a reach must change {st.pad_min_change:.0%} of the box)"
+                     if st.count_pads else ""))
+        else:
+            print(f"  counting : conveyor — axis={cfg.counting.axis} "
+                  f"line={cfg.counting.line_position} dir={cfg.counting.direction}")
+            print(f"  packing  : {'on' if cfg.packing.enabled else 'off'}"
+                  + (f", zone={cfg.packing.zone}" if cfg.packing.enabled else ""))
         print(f"  web      : {'off' if args.no_web or not cfg.web.enabled else 'http://0.0.0.0:%d/' % cfg.web.port}")
         print(f"  data dir : {cfg.output.data_dir}")
         return 0
@@ -224,11 +277,13 @@ def main(argv=None) -> int:
         and not args.log_level
 
     level = (args.log_level or cfg.output.log_level).upper()
-    logging.basicConfig(
-        # The panel owns the screen; routine INFO chatter would corrupt it.
-        level=logging.WARNING if use_status else getattr(logging, level, logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        datefmt="%H:%M:%S")
+    log_file = _setup_logging(level, use_status, cfg.output.data_dir)
+
+    record = args.record
+    if record == "auto":
+        from datetime import datetime
+        record = str(Path(cfg.output.data_dir) / "recordings" /
+                     datetime.now().strftime("clip_%Y-%m-%d_%H%M%S.mp4"))
 
     from .pipeline import Pipeline           # needs cv2, checked above
     pipeline = Pipeline(cfg,
@@ -236,11 +291,17 @@ def main(argv=None) -> int:
                         display=args.display,
                         enable_web=False if args.no_web else None,
                         max_frames=args.max_frames,
-                        status=use_status)
+                        status=use_status,
+                        record_path=record)
     pipeline.install_signal_handlers()
     summary = pipeline.run()
     print(f"frames={summary['frames']} counted_total={summary['total']} "
           f"session={summary['session']} fps={summary['fps']}")
+    if summary.get("recording"):
+        print(f"Video saved: {summary['recording']}")
+        print(f"Replay it:   python3 -m boxcounter --source {summary['recording']} --no-web")
+    if log_file:
+        print(f"Log (why each box/pad counted): {log_file}")
     return 0
 
 

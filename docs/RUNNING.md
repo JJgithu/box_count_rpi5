@@ -10,6 +10,12 @@ There are two ways to run it: **foreground** (you watch it, Ctrl-C stops it —
 use this while setting up) and **as a service** (starts at boot, restarts
 itself, survives you logging out — use this in production).
 
+> **Packing station (the default mode):** set it up once with
+> `python3 tools/station_setup.py`, and see [STATION.md](STATION.md) for what
+> the `now:` / `last:` lines under the panel mean, the tuning table, and how
+> to record a clip (`python3 -m boxcounter --record`). Every box and every
+> reach, with the reason it did or did not count, is in `data/boxcounter.log`.
+
 ---
 
 ## 1. Foreground: run it now and watch

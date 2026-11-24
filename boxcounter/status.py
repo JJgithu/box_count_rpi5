@@ -169,8 +169,16 @@ class StatusDisplay:
         box_bottom()
         line()
 
-        # -- live packing state --
-        if self.packing:
+        # -- live state --
+        if "station_state" in stats:
+            # Station mode: say in plain words what the camera sees right now,
+            # and the last thing it decided (why a reach did or did not count).
+            colour = _CYAN if stats.get("packing_now") else _DIM
+            line(f" {colour}now: {stats['station_state']}{_RESET}")
+            note = stats.get("station_note") or ""
+            line(f" {_DIM}{('last: ' + note) if note else ''}{_RESET}")
+            line()
+        elif self.packing:
             if stats.get("packing_now"):
                 hand = "  — hand in box" if stats.get("hand_in") else ""
                 line(f" {_CYAN}packing now: {stats.get('current_pieces', 0)} pads, "

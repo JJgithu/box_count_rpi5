@@ -1,25 +1,35 @@
 # box_count_rpi5
 
-Fully **offline** packing-line monitoring for a conveyor, running on a
-**Raspberry Pi 5 (2 GB)** with an **IMX219 camera** mounted above the belt.
-With no internet, no GPU and no neural network, it counts:
+Fully **offline** packing-station monitoring on a **Raspberry Pi 5 (2 GB)**
+with an **IMX219 camera** looking down at the packing spot. With no internet,
+no GPU and no neural network, it counts:
 
-1. **Boxes** — open or closed — as they pass a virtual line,
-2. **Pieces** (pads / sheets) the packer places into each box,
-3. **Pack time** for each box (arrival at the station → departure).
+1. **Boxes** — open or closed,
+2. **Pads** (pieces of paper) the packer puts into each box,
+3. **Pack time** for each box (set down at the station → gone),
+
+and writes one CSV row per box (box, time, pads, pack seconds).
+
+Two counting modes (`counting.mode` in `config/config.yaml`):
+
+| Mode | For | A box is counted when… |
+|---|---|---|
+| **`station`** (default) | a packing spot in front of a paper machine: the box stops, is filled, then slides on along the rollers or is lifted off — **[docs/STATION.md](docs/STATION.md)** | …it **leaves** the spot (any direction). Pads are counted per reach into the box. |
+| `conveyor` | boxes passing a point without stopping | …it crosses a counting line in the travel direction. |
 
 ```
-   IMX219 (top view, CSI)
-        │ 640x480 @ 30 fps (full-FoV binned sensor mode)
+   IMX219 (top view, CSI)  640x480 @ 30 fps, analysed at 320x240
+        │
         ▼
-  ┌─────────────┐   ┌──────────────┐   ┌──────────┐   ┌───────────────┐
-  │ background  │──▶│ blob detect  │──▶│ centroid │──▶│ line-crossing │
-  │ subtraction │   │ + open-box   │   │ tracking │   │ counter with  │
-  │ (color MOG2)│   │ fusion       │   │          │   │ hysteresis    │
-  └─────────────┘   └──────────────┘   └──────────┘   └──────┬────────┘
-                                                             ▼
-                                    SQLite + CSV logs · GPIO pulse (PLC)
-                                    LAN web dashboard with live video
+  ┌──────────────┐  ┌───────────────────┐  ┌──────────────────────┐
+  │ picture of   │─▶│ still + box-sized │─▶│ box at the station:  │
+  │ the EMPTY    │  │ + cardboard + in  │  │ reaches -> pads,     │
+  │ spot (kept   │  │ the zone = a box  │  │ leaves -> counted    │
+  │ up to date)  │  │ (hands never are) │  │ with pads + time     │
+  └──────────────┘  └───────────────────┘  └──────────┬───────────┘
+                                                      ▼
+                             SQLite + daily CSV · GPIO pulse (PLC)
+                             live terminal panel · LAN web dashboard
 ```
 
 ## Why classical CV instead of a neural network?
@@ -34,6 +44,25 @@ detector is a single class (`boxcounter/detector.py`) — if you ever outgrow
 it, you can swap in a TFLite/NCNN model without touching tracking or counting.
 
 ## Key robustness features
+
+Station mode:
+
+- **Hands are never boxes**: a box must stand perfectly still, be box-sized,
+  look like cardboard and sit at the packing spot; a hand or arm is none of
+  these for long. (The counting-line method counted a hand pulling a pad
+  towards the packer — this mode has no line.)
+- **Direction-free**: a box may arrive and leave either way along the
+  rollers, or be lifted on and off.
+- **Pads per reach, judged on the box itself**: the paper hanging from the
+  machine's outlet belongs to the picture of the empty spot, so the machine
+  pushing out the next pad is not a pad; a box shoved along the rollers is
+  followed, not counted as a pad; a soft shadow is not a pad.
+- **Explains itself**: the panel says what the camera sees right now and why
+  the last reach did or did not count; every decision goes to
+  `data/boxcounter.log`. `--record` saves the raw video for exact replays.
+- **No light flicker**: exposure is kept to whole mains-flicker periods.
+
+Both modes:
 
 - **Open boxes**: an open box's interior can look like the belt; a large
   morphological close + blob merging fuses the rim into one detection
@@ -65,13 +94,17 @@ git clone https://github.com/JJgithu/box_count_rpi5.git   # public repo: no auth
 cd box_count_rpi5
 bash scripts/install.sh                      # apt packages + systemd unit
 python3 -m boxcounter --check                # verify install and config
-python3 tools/wizard.py                      # guided calibration (see below)
+python3 tools/station_setup.py               # 2 pictures: empty spot, then a box
 python3 -m boxcounter                        # run; dashboard at http://<pi>:8080
 sudo systemctl enable --now boxcounter       # run at every boot
 ```
 
-**Not counting anything?** The wizard replays the real detection chain and
-tells you the exact stage that fails, then sets the geometry for you:
+Already installed and updating from an older version? See
+[docs/STATION.md §1](docs/STATION.md#1-update-the-pi-to-this-version).
+
+**Conveyor mode, not counting anything?** The wizard replays the real
+detection chain and tells you the exact stage that fails, then sets the
+geometry for you:
 
 ```bash
 python3 tools/wizard.py --diagnose     # where does the chain break?
@@ -92,17 +125,22 @@ works over SSH. Full procedure: [docs/CALIBRATION.md](docs/CALIBRATION.md).
 
 ```bash
 pip install -r requirements.txt
-python3 tools/make_test_video.py --out data/test.mp4 --boxes 12
-python3 -m boxcounter --source data/test.mp4 --no-web
-python3 -m pytest tests/                     # 38 tests incl. exact-count e2e
+python3 tools/make_station_video.py --out data/station.mp4 --pads 3 2 4
+python3 -m boxcounter --source data/station.mp4 --no-web
+python3 -m pytest tests/                     # unit + exact-count end-to-end tests
 ```
+
+The synthetic station video has a packer resting a hand on the empty rollers
+and waving across the view (neither may count), a pad hanging from the
+machine, and boxes sliding in and out along the rollers.
 
 ## Documentation
 
 | Document | Contents |
 |---|---|
-| [docs/IMPLEMENTATION_GUIDE.md](docs/IMPLEMENTATION_GUIDE.md) | **Start here** — complete step-by-step deployment walkthrough |
-| [docs/CALIBRATION.md](docs/CALIBRATION.md) | **If it isn't counting** — hyper-detailed calibration procedure |
+| [docs/STATION.md](docs/STATION.md) | **Packing station (default mode)** — update, setup, what the screen says, tuning, recording a clip |
+| [docs/IMPLEMENTATION_GUIDE.md](docs/IMPLEMENTATION_GUIDE.md) | Complete step-by-step deployment walkthrough |
+| [docs/CALIBRATION.md](docs/CALIBRATION.md) | Conveyor mode: hyper-detailed calibration procedure |
 | [docs/RUNNING.md](docs/RUNNING.md) | Day-to-day operation: starting, stopping, logs, reading counts |
 | [docs/PACKING.md](docs/PACKING.md) | Pieces-per-box + pack-time monitoring: concept, layout, tuning |
 | [docs/HARDWARE_SETUP.md](docs/HARDWARE_SETUP.md) | Mounting height/FoV math, lighting, wiring, GPIO to PLC |
@@ -116,8 +154,9 @@ boxcounter/          the application package
   camera.py            Picamera2 / video / USB frame sources
   detector.py          color background subtraction + open-box fusion
   tracker.py           predictive centroid tracker
-  counter.py           directional line counter with hysteresis
-  packing.py           pieces-per-box + pack-time monitor
+  station.py           packing-station mode: boxes, pads per reach, pack time
+  counter.py           directional line counter with hysteresis (conveyor)
+  packing.py           pieces-per-box + pack-time monitor (conveyor)
   pipeline.py          main loop wiring it all together
   storage.py           SQLite + daily CSV persistence
   gpio_out.py          one pulse per box (PLC / stack light)
@@ -126,8 +165,9 @@ boxcounter/          the application package
   asciiview.py         camera view as text, for calibrating over SSH
   configedit.py        comment-preserving config writer
 config/config.yaml   all tunables, heavily commented
-tools/               wizard (diagnose/live/geometry), calibrate, export_csv,
-                     capture background, synthetic video, benchmark
+tools/               station_setup (station mode), wizard (conveyor mode),
+                     calibrate, export_csv, capture background, synthetic
+                     videos (make_station_video / make_test_video), benchmark
 tests/               unit + exact-count end-to-end tests
 scripts/, systemd/   installer and boot service
 ```
