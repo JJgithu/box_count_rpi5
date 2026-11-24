@@ -13,7 +13,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
-from make_station_video import generate_station_video      # noqa: E402
+from make_station_video import OUTLET_ZONE, generate_station_video  # noqa: E402
 
 from boxcounter.camera import flicker_safe_exposure         # noqa: E402
 from boxcounter.config import AppConfig, StationConfig, load_config  # noqa: E402
@@ -139,6 +139,43 @@ def test_lighting_change_mid_shift(tmp_path):
     check(run_station(video), truth)
 
 
+def test_packer_who_starts_and_finishes_without_pausing(tmp_path):
+    """Real packing: the hand goes for the first pad the moment the box
+    arrives, and the box is pushed on the moment the last pad is in. There is
+    never a quiet moment before the first or after the last pad."""
+    video = tmp_path / "v.mp4"
+    truth = generate_station_video(str(video), pads_per_box=(2, 3, 2), fps=FPS,
+                                   seed=31, settle_s=0.0, end_s=0.0)
+    check(run_station(video), truth)
+
+
+@pytest.mark.parametrize("kw", [
+    dict(seed=32, gap_s=0.3),
+    dict(seed=33, gap_s=0.0, stay_hand=True),
+], ids=["short-gaps", "never-stops"])
+def test_hands_working_nonstop_never_split_or_lose_a_box(tmp_path, kw):
+    """A hand across the middle of the box splits it into two pieces, each
+    big enough to pass for a small box: it must stay ONE box, and a box that
+    never sees a quiet moment must still be counted, with its time."""
+    video = tmp_path / "v.mp4"
+    truth = generate_station_video(str(video), pads_per_box=(2, 3, 2), fps=FPS,
+                                   settle_s=0.0, end_s=0.0, **kw)
+    events = run_station(video)
+    assert len(events) == truth["boxes"]
+    for e, t in zip(events, truth["pack_seconds"]):
+        assert abs(e.pack_seconds - t) < 2.0
+
+
+def test_outlet_zone_keeps_counting_exact(tmp_path):
+    """With the outlet measured (setup step 3), the hanging paper is left out
+    of the box and the reaches; counting stays exact."""
+    video = tmp_path / "v.mp4"
+    truth = generate_station_video(str(video), pads_per_box=(3, 2, 4), fps=FPS)
+    cfg = StationConfig()
+    cfg.outlet_zone = list(OUTLET_ZONE)
+    check(run_station(video, cfg), truth)
+
+
 def test_pads_not_counted_when_disabled(tmp_path):
     video = tmp_path / "v.mp4"
     generate_station_video(str(video), pads_per_box=(2,), fps=FPS, rest_hand=False)
@@ -170,6 +207,9 @@ def test_station_is_the_default_mode(tmp_path):
     "station:\n  depart_cover: 0.6\n  present_cover: 0.5\n",
     "station:\n  quiet_seconds: 0\n",
     "camera:\n  flicker_hz: 55\n",
+    "station:\n  pad_method: magic\n",
+    "station:\n  pad_method: outlet\n",
+    "station:\n  outlet_zone: [0.9, 0.9, 0.5, 0.5]\n",
 ])
 def test_bad_station_settings_are_rejected(tmp_path, text):
     with pytest.raises(ValueError):
@@ -224,6 +264,30 @@ def test_setup_tool_measures_the_box_and_writes_a_valid_config(tmp_path):
     text, _ = set_values(cfg_path.read_text(), updates)
     cfg_path.write_text(text)
     assert load_config(cfg_path).station.zone == updates["station.zone"]
+
+
+def test_setup_tool_finds_the_pad_outlet(tmp_path):
+    import station_setup
+    video = tmp_path / "v.mp4"
+    generate_station_video(str(video), pads_per_box=(2,), fps=FPS, rest_hand=False)
+    cfg = load_config(ROOT / "config" / "config.yaml")
+    cap = cv2.VideoCapture(str(video))
+    frames = []
+    while True:
+        ok, f = cap.read()
+        if not ok:
+            break
+        frames.append(f)
+    empty = frames[int(1.0 * FPS)]
+    box = frames[int(3.7 * FPS)]
+    after = frames[int(6.6 * FPS)]          # first pad taken, next one hanging
+    res = station_setup.analyse(empty, box, cfg)
+    out = station_setup.find_outlet(box, after, cfg, res)
+    assert out is not None
+    zx, zy, zw, zh = out["zone"]
+    tx, ty, tw, th = OUTLET_ZONE
+    # it covers the real outlet's centre
+    assert zx <= tx + tw / 2 <= zx + zw and zy <= ty + th / 2 <= zy + zh
 
 
 # -- camera -----------------------------------------------------------------------

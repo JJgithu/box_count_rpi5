@@ -1,9 +1,13 @@
-"""Set up the packing-station counter: two pictures, two key presses.
+"""Set up the packing-station counter: two or three pictures.
 
     python3 tools/station_setup.py
 
 1. With the packing spot EMPTY, it takes a picture of the spot.
 2. With an EMPTY BOX standing on the spot, it takes a second picture.
+3. (Optional, recommended) After a pad is pulled off the machine and the
+   next one has come out, a third picture: the difference shows where pads
+   hang out of the machine, so that paper is never taken for part of a box
+   or for a hand, and pads can be counted where they come out.
 
 From the difference it measures where the box stands and how big it looks,
 checks the camera sees all of it, and offers to save that to the config
@@ -154,6 +158,36 @@ def analyse(empty: np.ndarray, box: np.ndarray, cfg) -> dict:
     return out
 
 
+def find_outlet(box: np.ndarray, after: np.ndarray, cfg, res: dict) -> Optional[dict]:
+    """Where the pad hangs: what differs between 'box, old pad' and
+    'box, new pad'. Returns {"zone": [x, y, w, h] fractions, "frac": ...}."""
+    st = cfg.station
+    size = res["size"]
+    a = cv2.GaussianBlur(cv2.resize(box, size, interpolation=cv2.INTER_AREA), (3, 3), 0)
+    b = cv2.GaussianBlur(cv2.resize(after, size, interpolation=cv2.INTER_AREA), (3, 3), 0)
+    raw, _ = foreground(b, a.astype(np.float32), a, st.diff_threshold, False)
+    m = cv2.morphologyEx(raw.astype(np.uint8), cv2.MORPH_OPEN,
+                         cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE,
+                         cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
+    if n <= 1:
+        return None
+    ww, wh = size
+    # the pad: the biggest change (a hand or the torn pad lying around would
+    # be somewhere else)
+    best = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    area = int(stats[best, cv2.CC_STAT_AREA])
+    frac = area / float(ww * wh)
+    x, y, w, h = (int(v) for v in stats[best, :4])
+    mx, my = max(2, int(0.12 * w)), max(2, int(0.12 * h))
+    x0, y0 = max(0, x - mx), max(0, y - my)
+    x1, y1 = min(ww, x + w + mx), min(wh, y + h + my)
+    return {"zone": [round(x0 / ww, 3), round(y0 / wh, 3),
+                     round((x1 - x0) / ww, 3), round((y1 - y0) / wh, 3)],
+            "frac": frac, "mask": labels == best}
+
+
 def propose(res: dict, cfg) -> dict:
     """Config values for this box."""
     ww, wh = res["size"]
@@ -198,6 +232,12 @@ def save_pictures(out_dir: Path, empty, box, res, updates) -> Path:
         cv2.putText(img, "PACKING ZONE (box centre must be inside)",
                     (int(zx * fw) + 4, int(zy * fh) + 16), cv2.FONT_HERSHEY_SIMPLEX,
                     0.45, (170, 180, 70), 1, cv2.LINE_AA)
+        if updates.get("station.outlet_zone"):
+            ox, oy, ow, oh = updates["station.outlet_zone"]
+            cv2.rectangle(img, (int(ox * fw), int(oy * fh)),
+                          (int((ox + ow) * fw) - 1, int((oy + oh) * fh) - 1), (60, 200, 240), 2)
+            cv2.putText(img, "PAD OUTLET", (int(ox * fw) + 4, int((oy + oh) * fh) - 6),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (60, 200, 240), 1, cv2.LINE_AA)
     path = out_dir / "setup_result.jpg"
     cv2.imwrite(str(path), img)
     return path
@@ -231,6 +271,9 @@ def main() -> int:
                     help="with --source: seconds into the video of the empty spot")
     ap.add_argument("--box-at", type=float, default=None,
                     help="with --source: seconds into the video of the box")
+    ap.add_argument("--outlet-at", type=float, default=None,
+                    help="with --source: seconds into the video after a new pad "
+                         "has come out (step 3); omit to skip step 3")
     ap.add_argument("--frames", type=int, default=20,
                     help="frames averaged per picture (default 20)")
     ap.add_argument("--yes", "-y", action="store_true",
@@ -246,7 +289,8 @@ def main() -> int:
             input(f"\n  {_BOLD}{prompt}{_RESET} ")
 
     _h("Packing-station setup")
-    print("  Two pictures: the empty packing spot, then an empty box on it.\n"
+    print("  Pictures of: the empty packing spot, an empty box on it, and\n"
+          "  (optional) the machine after it has pushed out a new pad.\n"
           "  Stop the counter first if it is running (the camera can only be\n"
           "  used by one program):  sudo systemctl stop boxcounter")
     try:
@@ -258,9 +302,10 @@ def main() -> int:
               "  sudo systemctl stop boxcounter) and run the setup again.")
         return 1
     try:
-        _h("Step 1 of 2 — the EMPTY spot")
+        _h("Step 1 of 3 — the EMPTY spot")
         print("  Clear the rollers in front of the machine: no box, no hands.\n"
-              "  Leave a pad hanging from the machine if one normally hangs there.")
+              "  Leave a pad hanging from the machine if one normally hangs there\n"
+              "  — and keep that same pad hanging for step 2.")
         ask("Press Enter when the spot is empty...")
         print("  Taking the picture — keep your hands out of view...")
         empty = grab.median(args.frames, args.empty_at)
@@ -269,9 +314,10 @@ def main() -> int:
             return 1
         _ok("got it")
 
-        _h("Step 2 of 2 — an EMPTY BOX on the spot")
+        _h("Step 2 of 3 — an EMPTY BOX on the spot")
         print("  Put an empty box exactly where it stands while it is packed,\n"
-              "  flaps open the way they normally are. Then step back.")
+              "  flaps open the way they normally are. Then step back. The pad\n"
+              "  hanging from the machine may hang over the box — leave it as is.")
         ask("Press Enter when the box is in place and your hands are away...")
         print("  Taking the picture...")
         box = grab.median(args.frames, args.box_at)
@@ -279,6 +325,24 @@ def main() -> int:
             _bad("no picture from the camera.")
             return 1
         _ok("got it")
+
+        outlet_img = None
+        _h("Step 3 of 3 — where the pads come out (recommended)")
+        print("  Leave the box where it is. Pull the hanging pad off the machine\n"
+              "  and put it ASIDE (not in the box, not on the rollers), and let\n"
+              "  the machine push out the next one. Then step back.")
+        if interactive:
+            ans = input(f"\n  {_BOLD}Press Enter when the new pad hangs still "
+                        f"(or type s and Enter to skip)...{_RESET} ").strip().lower()
+            if ans != "s":
+                print("  Taking the picture...")
+                outlet_img = grab.median(args.frames)
+        elif args.outlet_at is not None:
+            outlet_img = grab.median(args.frames, args.outlet_at)
+        if outlet_img is not None:
+            _ok("got it")
+        else:
+            print("  skipped")
     finally:
         grab.stop()
 
@@ -321,9 +385,23 @@ def main() -> int:
               "        (someone walking by, lights). If the result looks wrong,\n"
               "        run the setup again.")
 
+    if outlet_img is not None:
+        out = find_outlet(box, outlet_img, cfg, res)
+        cv2.imwrite(str(out_dir / "setup_outlet.jpg"), outlet_img)
+        if out is None or out["frac"] < 0.002:
+            _warn("I could not see the pad change at the machine — is the outlet in\n"
+                  "        the picture? Pads will be counted per reach into the box.")
+        elif out["frac"] > 0.35:
+            _warn("too much of the picture changed in step 3 (someone in view?);\n"
+                  "        the outlet was not saved. Run the setup again to retry.")
+        else:
+            updates["station.outlet_zone"] = out["zone"]
+            _ok(f"outlet found: the hanging pad covers {out['frac']:.0%} of the picture")
+            print("        That area is no longer looked at as part of the box.")
+
     picture = save_pictures(out_dir, empty, box, res, updates)
-    print(f"\n  Pictures saved: {picture} (the box in green,\n"
-          f"  the packing zone as a rectangle), setup_empty.jpg, setup_box.jpg")
+    print(f"\n  Pictures saved: {picture} (the box in green, the packing zone\n"
+          f"  and the pad outlet as rectangles), setup_empty.jpg, setup_box.jpg")
 
     _h("Settings for this box")
     for key, value in updates.items():

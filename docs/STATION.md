@@ -63,7 +63,7 @@ can use the camera at a time:
 sudo systemctl stop boxcounter
 ```
 
-## 2. Set up — two pictures, two key presses
+## 2. Set up — three pictures
 
 ```bash
 python3 tools/station_setup.py
@@ -73,7 +73,15 @@ python3 tools/station_setup.py
    machine, hands away. Leave a pad hanging from the machine if one normally
    hangs there. Press Enter.
 2. It asks you to put an **empty box exactly where it stands while it is
-   packed**, flaps open as usual, then step back. Press Enter.
+   packed**, flaps open as usual, then step back. The pad hanging from the
+   machine may hang over the box — that is fine, as long as it is the **same
+   pad, hanging the same way**, as in picture 1. Press Enter.
+3. (Recommended.) It asks you to **pull the hanging pad off and put it aside**
+   (not in the box), and let the machine push out the next one. When the new
+   pad hangs still and your hands are away, press Enter. From the difference
+   it learns where pads hang out of the machine; that paper is then never
+   mistaken for part of the box or for a hand moving over it. (Type `s` and
+   Enter to skip.)
 
 It then draws what it found in the terminal (the box as `@#`, the packing
 zone as `:.:`) and tells you:
@@ -85,7 +93,9 @@ zone as `:.:`) and tells you:
 
 Answer **Y** to save. A backup of the previous config is kept next to it
 (`config/config.backup-<date>.yaml`). The pictures are saved in `data/`
-(`setup_empty.jpg`, `setup_box.jpg`, `setup_result.jpg`).
+(`setup_empty.jpg`, `setup_box.jpg`, `setup_outlet.jpg`, and
+`setup_result.jpg` with the box, the packing zone and the pad outlet drawn
+on it).
 
 Run the setup again whenever the camera is moved or you switch to a very
 different box size. If you pack several box sizes, set up with the
@@ -154,27 +164,45 @@ after editing.
 | A box is never recognised; nothing happens at all | Run `tools/station_setup.py` again; check `min_box_frac` |
 | Boxes queued next to the spot get counted | Run the setup again (it narrows the `zone`) |
 | A quick stop (not a real box) gets counted | `min_pack_seconds: 3.0` → higher |
+| Box recognised late while you are already working on it | `confirm_busy_seconds: 1.2` → `0.8` |
 
-## 6. Record a clip so the counting can be tuned to your station
+## 6. Show what the counter saw (to tune it to your station)
 
-The most useful thing for improving the counting is a short video of real
-packing. While the counter runs:
+The decisions, with times, are in the log:
+
+```bash
+grep -E "Box|Ignoring|Learned|re-learn|abandon|gave up|Outlet" data/boxcounter.log | tail -n 60
+```
+
+Better still, record a short clip of real packing. While the counter runs:
 
 ```bash
 python3 -m boxcounter --record
 ```
 
-Pack 3–5 boxes as usual (count the pads yourself), then press Ctrl-C. The
+Pack 2–3 boxes as usual (count the pads yourself), then press Ctrl-C. The
 clip is saved as `data/recordings/clip_<date>_<time>.mp4` (about 10 MB per
-minute) and can be replayed any time, giving exactly the same counts:
+minute) and replays any time with exactly the same counts:
 
 ```bash
 python3 -m boxcounter --source data/recordings/clip_<date>_<time>.mp4 --no-web
 ```
 
-To share it: copy it to a USB stick, or upload it on github.com to the
-repository (Add file → Upload files; files up to 25 MB, about 2 minutes),
-together with how many pads went into each box.
+To turn it into pictures you can send like screenshots:
+
+```bash
+python3 tools/station_sheet.py data/recordings/clip_<date>_<time>.mp4
+```
+
+This writes `data/sheets/sheet_01.jpg`, `sheet_02.jpg`, … — one moment per
+second, each showing the camera picture with what the counter drew on it,
+next to what the counter "sees" — plus every decision in
+`data/sheets/decisions.txt`. From a Windows PC on the same network, copy them
+with (PowerShell):
+
+```powershell
+scp pi@countbox.local:box_count_rpi5/data/sheets/* .
+```
 
 ## 7. Known limits
 
@@ -186,10 +214,17 @@ together with how many pads went into each box.
 - **A box already standing on the spot when the counter starts** becomes part
   of the "empty" picture: it is not counted (the spot is repaired when it is
   taken away; the next boxes count normally).
+- **Pads need a short pause between them**: a reach ends when no hand has
+  moved over the box for `quiet_seconds` (0.5 s). If the hand never leaves
+  the box between two pads, they count as one.
 - **The first moments of a box**: the box is recognised within about a
-  second of being set down. A pad pushed in during that second is still
-  counted (it is compared with how the box looked when it arrived).
-- **If reach counting turns out not to be reliable enough at your station**,
-  the alternative is to count pads where they come out of the machine (each
-  pad torn off the outlet = one pad). That needs a recorded clip first to see
-  how the outlet looks to the camera.
+  second of being set down — also while you are already working on it. A
+  pad pushed in before that is still counted (it is compared with how the
+  box looked when it arrived).
+- **One box at a time**: the spot packs one box; anything else that stops
+  next to it waits until that box has left.
+- **Counting pads at the machine instead** (`pad_method: outlet`, needs
+  setup step 3) is available but experimental: where the hanging pad covers
+  part of the box from the camera's point of view, the box arriving and
+  leaving also changes the outlet. A recorded clip will show whether it
+  suits your station.

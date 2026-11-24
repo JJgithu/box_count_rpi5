@@ -60,12 +60,19 @@ _K7 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
 _CAND_GAP_S = 1.0          # a candidate may vanish this long (hand passing over)
 _GEOMETRY_EVERY_S = 0.5    # how often a quiet box's outline is re-checked
 _GEOMETRY_KEEP = 0.9       # outline only re-measured once coverage falls below
+_EARLY_FILL_S = 1.0        # a box's "before" picture is completed this long
 _BACKDATE_MAX_S = 10.0     # pack time may start at most this long before
                            # the box was confirmed
 _MOVED_KEEP = 0.75         # after a reach, less of the box's spot covered than
                            # this = the box itself was moved, not a pad added
-_STILL_COVER = 0.985       # box covers this much of its spot = not moved yet
+_LEAVE_DROP = 0.05         # coverage this far below its best = leaving
 _HURRIED_MIN_S = 0.5       # hand busy this long before the box moved = a reach
+_OUTLET_PRE_S = 1.5        # a pad taken this long before the box was set
+                           # down still belongs to it (pulled while sliding in)
+_OUTLET_MERGE_S = 0.3      # outlet changes this close together are one pad
+                           # (torn off, then the machine pushes out the next)
+_OUTLET_WAIT_S = 3.0       # a box that leaves while a pad is still coming out
+                           # waits at most this long for it to be counted
 _SHIFT_MIN_RESPONSE = 0.25 # phase-correlation peak needed to call it a shove
                            # (the silhouette must also fit better there)
 
@@ -146,6 +153,14 @@ def _as_u8(mask: np.ndarray) -> np.ndarray:
 
 
 @dataclass
+class _PadOut:
+    """One pad taken from the machine (outlet counting)."""
+    start: float                    # the hand reached the outlet
+    end: float                      # the next pad hung still again
+    credited: Optional[int] = None  # session id it was counted for
+
+
+@dataclass
 class _Candidate:
     """Something still, box-sized, in the zone — not yet confirmed."""
     bbox: Rect
@@ -157,9 +172,15 @@ class _Candidate:
     label: int = -1                 # component index this frame; -1 = unseen
     rejected_until: float = -1.0
     reason: str = ""
-    early: Optional[np.ndarray] = None   # work-frame grey image of the box
-                                         # before anyone reached into it
+    # How the box looked before anyone reached into it, built pixel by pixel
+    # from the first moment each part was seen still: parts a hand covered
+    # at first fill in as soon as the hand moves on.
+    early: Optional[np.ndarray] = None       # work-frame grey
+    early_known: Optional[np.ndarray] = None  # which pixels are filled in
     busy: bool = False              # a hand moved over it while unconfirmed
+    seen: Optional[np.ndarray] = None    # everywhere it has been seen still
+                                         # (a hand hides different parts of
+                                         # the box at different moments)
 
     def age(self, t: float) -> float:
         return t - self.first_t
@@ -180,6 +201,12 @@ class _Session:
     interior: Rect = (0, 0, 1, 1)
     fp_int: Optional[np.ndarray] = None     # interior-local bool
     fp_int_area: int = 1
+    interior_stale: bool = False            # outline grew; re-measure when quiet
+    core: Optional[np.ndarray] = None       # bbox-local: the box minus its rim
+    core_area: int = 1
+    ref_exclude: Optional[np.ndarray] = None  # interior-local: ignore in the
+                                              # next comparison (a hand that
+                                              # was in the before-picture)
     low_since: Optional[float] = None
     pads: int = 0
     reaches: int = 0
@@ -229,6 +256,25 @@ class StationMonitor:
                      (zx + zw) * self.ww, (zy + zh) * self.wh)
         self.min_area = cfg.min_box_frac * self.roi_area
         self.max_area = cfg.max_box_frac * self.roi_area
+        # Where pads come out of the machine. Excluded from everything about
+        # the BOX (the paper hanging there is not the box), and watched on
+        # its own when pads are counted at the outlet.
+        self.outlet: Optional[Rect] = None
+        self.outlet_mask: Optional[np.ndarray] = None
+        if cfg.outlet_zone:
+            ox, oy, ow, oh = cfg.outlet_zone
+            x0, y0 = int(ox * self.ww), int(oy * self.wh)
+            x1 = min(self.ww, int(round((ox + ow) * self.ww)))
+            y1 = min(self.wh, int(round((oy + oh) * self.wh)))
+            self.outlet = (x0, y0, max(4, x1 - x0), max(4, y1 - y0))
+            self.outlet_mask = np.zeros((self.wh, self.ww), bool)
+            self.outlet_mask[y0:y1, x0:x1] = True
+        # Outlet counting only when chosen: where the hanging pad covers part
+        # of the box from the camera's point of view, the box arriving and
+        # leaving changes the outlet too. The outlet zone is still used to
+        # keep the hanging paper out of the box and out of the reaches.
+        self.pad_mode = "outlet" if (cfg.pad_method == "outlet"
+                                     and self.outlet is not None) else "reach"
         self.debug = debug
         self._next_sid = 1
         self._clear()
@@ -250,6 +296,16 @@ class StationMonitor:
         self._frame_no = 0
         self.note = ""                       # last decision, for the panel
         self._stable: Optional[np.ndarray] = None
+        # outlet counting
+        self.pad_events: List[_PadOut] = []
+        self._o_ref: Optional[Tuple[np.ndarray, np.ndarray]] = None
+        self._o_ref_t = 0.0
+        self._o_burst = False
+        self._o_burst_start = 0.0
+        self._o_on = 0
+        self._o_quiet_since: Optional[float] = None
+        self._o_recent: Deque[float] = deque(maxlen=3)
+        self._finishing: List[Tuple[_Session, float]] = []
         self.last_reach: Optional[dict] = None
         self._dbg = None
 
@@ -317,6 +373,12 @@ class StationMonitor:
         fg_raw &= self.roi_mask
         fg = cv2.morphologyEx(_as_u8(fg), cv2.MORPH_OPEN, _K3).astype(bool)
         fg &= self.roi_mask
+        if self.outlet_mask is not None:
+            if self.pad_mode == "outlet" and cfg.count_pads:
+                self._outlet_update(tr, gray, motion)
+            # The paper hanging from the outlet is never part of a box.
+            fg &= ~self.outlet_mask
+            motion = motion & ~self.outlet_mask
         self.fg_since[~fg] = tr
         stable = fg & still
         self._stable = stable
@@ -326,6 +388,13 @@ class StationMonitor:
             ev = self._update_session(s, tr, small, gray, fg, motion, stable)
             if ev is not None:
                 events.append(ev)
+        for s, deadline in list(self._finishing):
+            # Waiting for the last pad of a box that has already left.
+            if not self._o_burst or tr >= deadline:
+                self._finishing.remove((s, deadline))
+                ev = self._count_box(s)
+                if ev is not None:
+                    events.append(ev)
         self._update_candidates(tr, small, gray, fg, stable, motion)
         self._maintain_background(tr, small, fg_raw, still)
         if self.debug:
@@ -334,7 +403,22 @@ class StationMonitor:
 
     # -- sessions ----------------------------------------------------------
 
-    def _set_geometry(self, s: _Session, bbox: Rect, fp: np.ndarray) -> None:
+    def _set_interior(self, s: _Session) -> None:
+        # The inside of the box, where pads land: its outline shrunk past the
+        # spread flaps and the rim. Deliberately the whole rectangle, not just
+        # the box-coloured part: the pad hanging from the machine covers part
+        # of the box from the camera's point of view, and a pad stuffed under
+        # it is only visible as the hanging pad being torn off and replaced.
+        x, y, w, h = s.bbox
+        ins = int(round(self.cfg.interior_inset_frac * min(w, h)))
+        iw, ih = max(4, w - 2 * ins), max(4, h - 2 * ins)
+        s.interior = (x + (w - iw) // 2, y + (h - ih) // 2, iw, ih)
+        s.fp_int = np.ones((ih, iw), bool)
+        s.fp_int_area = iw * ih
+        s.interior_stale = False
+
+    def _set_geometry(self, s: _Session, bbox: Rect, fp: np.ndarray,
+                      keep_interior: bool = False) -> None:
         x, y, w, h = (int(v) for v in bbox)
         s.bbox = (x, y, w, h)
         s.fp = np.ascontiguousarray(fp, dtype=bool)
@@ -351,16 +435,21 @@ class StationMonitor:
         if np.count_nonzero(s.act_mask) < 0.3 * s.fp_area:
             s.act_mask = act.astype(bool)        # thin outline: keep it whole
         s.act_area = max(1, int(np.count_nonzero(s.act_mask)))
-        # The inside of the box, where pads land: its outline shrunk past the
-        # spread flaps and the rim. Deliberately the whole rectangle, not just
-        # the box-coloured part: the pad hanging from the machine covers part
-        # of the box from the camera's point of view, and a pad stuffed under
-        # it is only visible as the hanging pad being torn off and replaced.
-        ins = int(round(self.cfg.interior_inset_frac * min(w, h)))
-        iw, ih = max(4, w - 2 * ins), max(4, h - 2 * ins)
-        s.interior = (x + (w - iw) // 2, y + (h - ih) // 2, iw, ih)
-        s.fp_int = np.ones((ih, iw), bool)
-        s.fp_int_area = iw * ih
+        if keep_interior and s.fp_int is not None:
+            # Mid-reach: keep comparing the same rectangle; it is re-measured
+            # at the next quiet moment.
+            s.interior_stale = True
+        else:
+            self._set_interior(s)
+        # The core of the box: whether the BOX moved is judged on this, so a
+        # torn-off pad or a flap at the edge of the outline cannot make every
+        # reach look like a shove.
+        k = max(1, int(0.12 * min(w, h)))
+        ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * k + 1, 2 * k + 1))
+        core = cv2.erode(_as_u8(s.fp), ker).astype(bool)
+        s.core = core if np.count_nonzero(core) >= 0.2 * s.fp_area else s.fp
+        s.core_area = max(1, int(np.count_nonzero(s.core)))
+        s.ref_exclude = None
         s.hist.clear()
 
     def _update_session(self, s: _Session, tr: float, small: np.ndarray,
@@ -394,22 +483,44 @@ class StationMonitor:
             if tr - s.low_since >= cfg.depart_seconds:
                 # Gone. Counted right away: on a conveyor the next box can be
                 # on the spot a second later and must start its own session.
-                if s.in_reach and cfg.count_pads:
+                if s.in_reach and cfg.count_pads and self.pad_mode == "reach":
                     self._settle_hurried_reach(s)
                 log.info("Box %d left the spot", s.sid)
                 return self._finish(s)
         else:
             s.low_since = None
 
-        if cfg.count_pads:
+        if cfg.count_pads and self.pad_mode == "reach":
             self._reach_fsm(s, tr, gray, fg)
+        else:
+            # Pads are counted at the outlet; "hand in box" is just for show.
+            s.in_reach = s.act >= cfg.reach_start_motion
+            if self.pad_mode == "outlet":
+                s.pads = self._outlet_pads_for(s, tr) * cfg.pieces_per_visit
         if not s.in_reach:
             self._refresh_geometry(s, tr, gray, stable)
         return None
 
     def _finish(self, s: _Session) -> Optional[CountEvent]:
-        cfg = self.cfg
         self.sessions.remove(s)
+        if (self.pad_mode == "outlet" and self.cfg.count_pads and self._o_burst
+                and s.start_t - _OUTLET_PRE_S <= self._o_burst_start <= s.last_present_t):
+            # A pad was being taken as the box left (the packer pushed it on
+            # straight after the last pad): wait for the outlet to settle so
+            # that pad is counted for this box.
+            self._finishing.append((s, self._tr + _OUTLET_WAIT_S))
+            return None
+        return self._count_box(s)
+
+    def _count_box(self, s: _Session) -> Optional[CountEvent]:
+        cfg = self.cfg
+        if self.pad_mode == "outlet" and cfg.count_pads:
+            n = 0
+            for e in self.pad_events:
+                if e.credited is None and self._outlet_window(s, e):
+                    e.credited = s.sid
+                    n += 1
+            s.pads = n * cfg.pieces_per_visit
         dur = max(0.0, s.last_present_t - s.start_t)
         if dur < cfg.min_pack_seconds:
             log.info("Not counted: something stood at the spot only %.1f s "
@@ -430,9 +541,101 @@ class StationMonitor:
                      if cfg.count_pads else f"box counted: packed in {dur:.1f} s")
         return ev
 
-    # -- pads ----------------------------------------------------------------
+    # -- pads: at the outlet --------------------------------------------------
+
+    @staticmethod
+    def _outlet_window(s: _Session, e: _PadOut) -> bool:
+        return s.start_t - _OUTLET_PRE_S <= e.start <= s.last_present_t + 0.2
+
+    def _outlet_pads_for(self, s: _Session, tr: float) -> int:
+        return sum(1 for e in self.pad_events
+                   if e.credited is None and e.start >= s.start_t - _OUTLET_PRE_S)
+
+    def _outlet_update(self, tr: float, gray: np.ndarray, motion: np.ndarray) -> None:
+        """Count pads where they come out of the machine.
+
+        The outlet zone is watched on its own: a burst of movement there (the
+        packer taking the pad, the machine pushing out the next) followed by
+        the zone hanging still again LOOKING DIFFERENT — a new pad, crumpled
+        differently — is one pad taken. A hand that only brushes the hanging
+        pad leaves it looking the same and is not counted."""
+        cfg = self.cfg
+        x, y, w, h = self.outlet
+        mo = float(np.count_nonzero(motion[y:y + h, x:x + w])) / (w * h)
+        self._o_recent.append(mo)
+        quiet = float(np.median(self._o_recent)) < 0.01
+        crop = gray[y:y + h, x:x + w]
+
+        if self._o_ref is None:
+            if quiet:
+                if self._o_quiet_since is None:
+                    self._o_quiet_since = tr
+                if tr - self._o_quiet_since >= cfg.outlet_quiet_seconds:
+                    self._o_ref, self._o_ref_t = snapshot(crop), tr
+                    self._o_quiet_since = None
+            else:
+                self._o_quiet_since = None
+            return
+
+        if not self._o_burst:
+            if mo >= 0.03:
+                self._o_on += 1
+                if self._o_on >= 2:
+                    self._o_burst = True
+                    self._o_burst_start = tr
+                    self._o_quiet_since = None
+            else:
+                self._o_on = 0
+                if quiet and tr - self._o_ref_t >= 2.0:
+                    # follow slow drift (light, paper relaxing) when nothing
+                    # happened there
+                    cur = snapshot(crop)
+                    if self._outlet_change(cur) < cfg.outlet_min_change / 3:
+                        self._o_ref, self._o_ref_t = cur, tr
+            return
+
+        if quiet:
+            if self._o_quiet_since is None:
+                self._o_quiet_since = tr
+            if tr - self._o_quiet_since >= cfg.outlet_quiet_seconds:
+                cur = snapshot(crop)
+                frac = self._outlet_change(cur)
+                self._o_burst = False
+                self._o_on = 0
+                self._o_ref, self._o_ref_t = cur, tr
+                if frac < cfg.outlet_min_change:
+                    log.info("Outlet: something moved there but the pad looks the "
+                             "same (%.0f%% changed) -> not a pad", 100 * frac)
+                    return
+                last = self.pad_events[-1] if self.pad_events else None
+                if last is not None and self._o_burst_start - last.end < _OUTLET_MERGE_S:
+                    # torn off, then the machine pushed out the next: one pad
+                    last.end = tr
+                    log.info("Outlet: pad change continued (%.0f%%), same pad", 100 * frac)
+                    return
+                self.pad_events.append(_PadOut(start=self._o_burst_start, end=tr))
+                self.note = f"a pad was taken from the machine ({frac:.0%} of the outlet changed)"
+                log.info("Outlet: a pad was taken (%.0f%% of the outlet changed)", 100 * frac)
+                # keep the list short
+                if len(self.pad_events) > 500:
+                    self.pad_events = self.pad_events[-200:]
+        else:
+            self._o_quiet_since = None
+        if self._o_burst and tr - self._o_burst_start > 60.0:
+            # a hand resting at the outlet for a minute: start over
+            self._o_burst = False
+            self._o_ref, self._o_ref_t = snapshot(crop), tr
+
+    def _outlet_change(self, cur: Tuple[np.ndarray, np.ndarray]) -> float:
+        if self._o_ref is None or self._o_ref[0].shape != cur[0].shape:
+            return 0.0
+        ch = changed_mask(self._o_ref, cur, self.cfg.change_threshold)
+        return float(np.count_nonzero(ch)) / ch.size
+
+    # -- pads: per reach --------------------------------------------------------
 
     def _take_ref(self, s: _Session, gray: np.ndarray, tr: float) -> None:
+        s.ref_exclude = None
         s.ref = snapshot(self._crop(gray, s.interior))
         s.ref_outer = self._crop(gray, s.outer).astype(np.float32)
         s.ref_t = tr
@@ -450,6 +653,17 @@ class StationMonitor:
             return 0.0
         part = s.fp[y0 - oy:y1 - oy, x0 - ox:x1 - ox]
         return float(np.count_nonzero(fg_outer[y0:y1, x0:x1] & part)) / s.fp_area
+
+    def _core_cover_in(self, fg_outer: np.ndarray, at: Rect, s: _Session) -> float:
+        x, y, w, h = s.bbox
+        ox, oy = x - at[0], y - at[1]
+        H, W = fg_outer.shape
+        x0, y0 = max(0, ox), max(0, oy)
+        x1, y1 = min(W, ox + w), min(H, oy + h)
+        if x1 <= x0 or y1 <= y0:
+            return 0.0
+        part = s.core[y0 - oy:y1 - oy, x0 - ox:x1 - ox]
+        return float(np.count_nonzero(fg_outer[y0:y1, x0:x1] & part)) / s.core_area
 
     def _box_shift(self, s: _Session, out_img: np.ndarray,
                    fg_outer: np.ndarray) -> Optional[Tuple[int, int]]:
@@ -492,6 +706,8 @@ class StationMonitor:
         if s.ref is None or s.ref[0].shape != cur[0].shape:
             return 0.0
         ch = changed_mask(s.ref, cur, self.cfg.change_threshold) & s.fp_int
+        if s.ref_exclude is not None and s.ref_exclude.shape == ch.shape:
+            ch &= ~s.ref_exclude
         if still_ref is not None:
             img, valid = still_ref
             filled = np.where(valid, img, cur[0])
@@ -516,6 +732,8 @@ class StationMonitor:
                 # paper slowly settling between reaches is not mistaken for a
                 # new pad at the next reach.
                 if s.act < cfg.reach_end_motion and tr - s.ref_t >= 0.5:
+                    if s.interior_stale:
+                        self._set_interior(s)
                     self._take_ref(s, gray, tr)
             return
 
@@ -565,6 +783,9 @@ class StationMonitor:
         else:
             cov = s.cov
             int_img = self._crop(gray, s.interior)
+            out_img = fg_out = None
+        if out_img is None or fg_out is None or out_img.shape[:2] != (s.outer[3], s.outer[2]):
+            # (frame recorded before the outline grew: use the current one)
             out_img = self._crop(gray, s.outer)
             fg_out = self._crop(fg, s.outer)
         old_outer, old_ref_outer = s.outer, s.ref_outer
@@ -586,10 +807,12 @@ class StationMonitor:
                 # not count this reach as a pad.
                 far = True
         frac = self._change_frac(s, snapshot(int_img), still_ref) if not far else 0.0
-        moved = far or cov < _MOVED_KEEP
+        core_cov = self._core_cover_in(fg_out, old_outer if how else s.outer, s)
+        moved = far or core_cov < _MOVED_KEEP
         self._judge_reach(s, frac, moved, tr, how)
         # The next reach is compared with this same quiet moment — not with
         # the current frame, which may already show the next hand coming in.
+        s.ref_exclude = None
         if quiet and not how:
             s.ref = snapshot(int_img)
             s.ref_outer = out_img.astype(np.float32)
@@ -634,13 +857,21 @@ class StationMonitor:
         but only if a hand was at work well before that: a "reach" that is
         really just the box starting to slide has nothing to judge."""
         hist = list(s.hist)
-        moved = next((i for i, h in enumerate(hist) if h[1] < _STILL_COVER), None)
-        if moved is None or s.ref is None:
+        if not hist or s.ref is None:
             return
-        t_moved = hist[moved][0]
+        # When did the box begin to leave? The last moment it still covered
+        # its outline about as well as it did during the reach. (A hand over
+        # the box makes the coverage wobble by a percent or two; leaving makes
+        # it collapse.)
+        base = max(h[1] for h in hist)
+        in_place = [i for i, h in enumerate(hist) if h[1] >= base - _LEAVE_DROP]
+        if not in_place:
+            return
+        last = in_place[-1]
+        t_moved = hist[last][0]
         if t_moved - s.reach_start_t < _HURRIED_MIN_S:
             return
-        before = [h for h in hist[:moved] if h[0] <= t_moved - 0.1][-15:]
+        before = [h for h in hist[:last + 1] if h[0] <= t_moved - 0.1][-15:]
         if not before:
             return
         best = min(before, key=lambda h: h[2])
@@ -735,6 +966,10 @@ class StationMonitor:
                 continue
             best.bbox, best.area, best.last_t, best.label = bbox, area, tr, i
         for c in self.candidates:
+            if c.label != -1:
+                comp_now = labels == c.label
+                c.seen = comp_now if c.seen is None else (c.seen | comp_now)
+        for c in self.candidates:
             if c.label == -1:
                 # Not seen as a still blob this frame. If its spot is still
                 # mostly covered by something (the box under a moving hand),
@@ -752,19 +987,46 @@ class StationMonitor:
             quiet = (np.count_nonzero(motion[y:y + h, x:x + w])
                      <= cfg.reach_end_motion * w * h)
             if not quiet:
-                c.busy = c.busy or c.early is not None
-            elif c.early is None and not c.busy and c.area >= self.min_area:
-                # The box as it looked before anyone reached into it: if a pad
-                # goes in before the box is confirmed, it is still counted.
+                c.busy = True
+            # The box before anyone reached into it, so a pad put in before
+            # the box is confirmed is still counted: its very first look,
+            # minus whatever was moving in that look (a hand); the gaps are
+            # filled in during the first moments if those parts go still.
+            # (A pad needs a reach to the machine first, so it cannot be in
+            # the box that early.)
+            if c.early is None:
                 c.early = gray.copy()
-            # Confirm only at a quiet moment: a hand over the box is then not
-            # mistaken for part of it, and a box still sliding along the
-            # rollers (always moving at its edges) is never confirmed.
+                c.early_known = ~cv2.dilate(_as_u8(motion), _K7).astype(bool)
+            elif tr - c.first_t <= _EARLY_FILL_S:
+                new_px = stable & ~c.early_known
+                c.early[new_px] = gray[new_px]
+                c.early_known |= new_px
+            # Confirm at a quiet moment if there is one (a hand over the box
+            # is then not mistaken for part of it), otherwise once the box
+            # has stood long enough with hands working over it. A box still
+            # sliding along the rollers is never still long enough to get
+            # here, and a passing one would not stay min_pack_seconds anyway.
+            ready = quiet or c.age(tr) >= cfg.confirm_busy_seconds
             if (c.age(tr) < cfg.confirm_seconds or tr < c.rejected_until
-                    or not quiet or c.area < self.min_area):
+                    or not ready or c.area < self.min_area):
                 continue
             comp = labels == c.label
-            ok, reason = self._accept(comp, c.area, small)
+            if not quiet and c.seen is not None:
+                # Busy: the box is where it has been seen still and still is
+                # not empty floor now (the moving hand is excluded either way).
+                comp = (c.seen | comp) & fg
+            comp = self._clean_footprint(comp, small)
+            if self.sessions:
+                # One box is packed at a time. Anything else that stands still
+                # at the spot meanwhile is either a piece of that box (a hand
+                # across it splits it in two; part of it was hidden when it was
+                # confirmed) — or it waits until that box has left.
+                owner = self._overlapping_session(comp)
+                if owner is not None:
+                    self._grow_footprint(owner, comp)
+                    self.candidates.remove(c)
+                continue
+            ok, reason = self._accept(comp, int(np.count_nonzero(comp)), small)
             if not ok:
                 if reason:
                     if reason != c.reason:
@@ -776,9 +1038,46 @@ class StationMonitor:
                     self.candidates.remove(c)
                 continue
             self.candidates.remove(c)
-            fp = self._clean_footprint(comp, small)
-            self._absorb_fragments(c, fp)
-            self._start_session(tr, fp, c, gray)
+            self._absorb_fragments(c, comp)
+            self._start_session(tr, comp, c, gray)
+
+    def _overlapping_session(self, comp: np.ndarray) -> Optional[_Session]:
+        """The session whose box this blob touches or nearly touches."""
+        ys, xs = np.nonzero(comp)
+        if xs.size == 0:
+            return None
+        cb = (int(xs.min()), int(ys.min()),
+              int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1))
+        for s in self.sessions:
+            x, y, w, h = s.bbox
+            # Touching, or separated only by an arm's width.
+            near = expand_rect(s.bbox, max(4, int(0.25 * max(w, h))), self.ww, self.wh)
+            if rect_iou(cb, near) > 0.0:
+                return s
+        return None
+
+    def _grow_footprint(self, s: _Session, comp: np.ndarray) -> None:
+        """Add a newly seen part of the box to its outline, within reason."""
+        x, y, w, h = s.bbox
+        whole = np.zeros((self.wh, self.ww), bool)
+        whole[y:y + h, x:x + w] = s.fp
+        union = whole | comp
+        if np.count_nonzero(union) > self.max_area:
+            return                       # bigger than any box: not a part
+        ys, xs = np.nonzero(union)
+        nx, ny = int(xs.min()), int(ys.min())
+        nw, nh = int(xs.max()) - nx + 1, int(ys.max()) - ny + 1
+        if (nw, nh) == (w, h) and (nx, ny) == (x, y) and np.count_nonzero(union) == s.fp_area:
+            return
+        ref, ref_outer, excl, hist = s.ref, s.ref_outer, s.ref_exclude, list(s.hist)
+        self._set_geometry(s, (nx, ny, nw, nh), union[ny:ny + nh, nx:nx + nw],
+                           keep_interior=True)
+        # The pad comparison keeps its rectangle and before-picture; the outer
+        # crop changed size, so the shove check restarts from the next frame.
+        s.ref, s.ref_exclude = ref, excl
+        s.ref_outer = None
+        s.hist.extend(h[:4] + (None, None) for h in hist)
+        log.info("Box %d outline extended (part of it was hidden)", s.sid)
 
     def _absorb_fragments(self, c: _Candidate, comp: np.ndarray) -> None:
         """A hand across a small box splits it into pieces that were followed
@@ -789,12 +1088,18 @@ class StationMonitor:
             cx, cy = min(x + w // 2, self.ww - 1), min(y + h // 2, self.wh - 1)
             if not comp[cy, cx]:
                 continue
-            if o.first_t < c.first_t:
-                c.first_t = o.first_t
-                if o.early is not None:
-                    c.early = o.early
-            elif c.early is None:
-                c.early = o.early
+            first = min(c.first_t, o.first_t)
+            if o.early is not None:
+                # Only a view from the box's first moments is a "before"
+                # picture: a piece first seen later may already show a pad.
+                if c.early is None:
+                    if o.first_t - first <= _EARLY_FILL_S:
+                        c.early, c.early_known = o.early, o.early_known
+                elif o.first_t - first <= _EARLY_FILL_S:
+                    take = o.early_known & (~c.early_known | (o.first_t < c.first_t))
+                    c.early[take] = o.early[take]
+                    c.early_known |= o.early_known
+            c.first_t = first
             c.busy = c.busy or o.busy
             self.candidates.remove(o)
 
@@ -887,12 +1192,18 @@ class StationMonitor:
                  100.0 * s.fp_area / self.roi_area)
         self.note = "box arrived"
         if self.cfg.count_pads and c.busy and c.early is not None:
-            # Someone reached into the box while we were still making sure it
-            # is a box: judge that reach against how the box looked before.
-            s.ref = snapshot(self._crop(c.early, s.interior))
-            frac = self._change_frac(s, snapshot(self._crop(gray, s.interior)))
-            self._judge_reach(s, frac, False, tr, " (before the box was confirmed)")
-            self._take_ref(s, gray, tr)
+            # Hands were already at work on the box while we were making sure
+            # it is a box: that is a reach in progress. It will be judged when
+            # it ends, against how the box looked when it arrived (parts never
+            # seen uncovered are left out of that comparison).
+            early = np.where(c.early_known, c.early, gray)
+            s.ref = snapshot(self._crop(early, s.interior))
+            s.ref_outer = self._crop(early, s.outer).astype(np.float32)
+            s.ref_exclude = ~self._crop(c.early_known, s.interior).copy()
+            s.in_reach = True
+            s.reach_start_t = c.first_t
+            s.quiet_since = None
+            s.hist.clear()
 
     # -- background upkeep ---------------------------------------------------
 
@@ -904,10 +1215,13 @@ class StationMonitor:
             ox, oy, ow, oh = expand_rect(s.outer, 4, self.ww, self.wh)
             protect[oy:oy + oh, ox:ox + ow] = True
         keep_present = protect.copy()
+        # Box-sized things at the spot are never folded into the empty-spot
+        # picture while they are being looked at — including while one is set
+        # aside for a moment (an arm resting on it, say). A box that stays
+        # still for long must not vanish just because of that.
         for c in self.candidates:
-            if tr >= c.rejected_until:          # still being checked
-                x, y, w, h = c.bbox
-                protect[y:y + h, x:x + w] = True
+            x, y, w, h = c.bbox
+            protect[y:y + h, x:x + w] = True
 
         changed = False
         if self._frame_no % 3 == 0:
@@ -994,6 +1308,7 @@ class StationMonitor:
             cands.append({"bbox": self.to_full(c.bbox), "age_s": c.age(self._tr),
                           "rejected": self._tr < c.rejected_until})
         return {
+            "outlet": self.to_full(self.outlet) if self.outlet else None,
             "roi": self.to_full(self.roi),
             "zone": self.to_full((int(zx0), int(zy0), int(zx1 - zx0), int(zy1 - zy0))),
             "sessions": sessions,

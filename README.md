@@ -94,7 +94,7 @@ git clone https://github.com/JJgithu/box_count_rpi5.git   # public repo: no auth
 cd box_count_rpi5
 bash scripts/install.sh                      # apt packages + systemd unit
 python3 -m boxcounter --check                # verify install and config
-python3 tools/station_setup.py               # 2 pictures: empty spot, then a box
+python3 tools/station_setup.py               # pictures: empty spot, a box, the outlet
 python3 -m boxcounter                        # run; dashboard at http://<pi>:8080
 sudo systemctl enable --now boxcounter       # run at every boot
 ```
@@ -165,7 +165,7 @@ boxcounter/          the application package
   asciiview.py         camera view as text, for calibrating over SSH
   configedit.py        comment-preserving config writer
 config/config.yaml   all tunables, heavily commented
-tools/               station_setup (station mode), wizard (conveyor mode),
+tools/               station_setup + station_sheet (station mode), wizard (conveyor mode),
                      calibrate, export_csv, capture background, synthetic
                      videos (make_station_video / make_test_video), benchmark
 tests/               unit + exact-count end-to-end tests

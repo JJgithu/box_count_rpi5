@@ -202,6 +202,9 @@ class StationConfig:
     motion_threshold: int = 14        # frame-to-frame change (0-255) = movement
     still_seconds: float = 0.5        # unchanged this long = "still"
     confirm_seconds: float = 0.6      # a still box must stay this long
+    # ... and if hands never stop moving over it (a packer who starts on the
+    # box the moment it arrives), it is confirmed anyway after this long.
+    confirm_busy_seconds: float = 1.2
     # An arm resting on the rollers touches the picture edge with a narrow
     # wrist/forearm; a box touching the edge does so along a whole side.
     # Contact length / sqrt(area) below this = arm-like, rejected.
@@ -214,6 +217,24 @@ class StationConfig:
     max_session_seconds: float = 1800.0  # give up on a "box" after 30 min
     # -- pads ----------------------------------------------------------------
     count_pads: bool = True
+    # How pads are counted:
+    #   reach  = every reach into the box that leaves the box looking
+    #            different (needs a short pause, about half a second, with no
+    #            hand over the box between pads).
+    #   outlet = experimental: at the paper machine — every time a new pad
+    #            has come out of the outlet and hangs still, one pad was taken
+    #            (needs outlet_zone). Can miscount when the hanging pad covers
+    #            part of the box from the camera's point of view.
+    #   auto   = reach.
+    pad_method: str = "auto"
+    # Where pads hang out of the machine, [x, y, w, h] fractions of the
+    # picture; [] = not measured (tools/station_setup.py step 3). That area
+    # is left out when looking for the box and for hands over it.
+    outlet_zone: List[float] = field(default_factory=list)
+    # Share of the outlet zone that must look different once the new pad
+    # hangs still, to count as one pad taken.
+    outlet_min_change: float = 0.15
+    outlet_quiet_seconds: float = 0.4 # outlet still this long = the pad has settled
     # A reach starts when this share of the box shows movement ...
     reach_start_motion: float = 0.03
     # ... and ends after the box has been nearly still (below
@@ -341,6 +362,22 @@ def _validate(cfg: AppConfig) -> None:
             errors.append(f"station.zone {zone} out of bounds (fractions of frame)")
     if not (0.0 < st.min_box_frac < st.max_box_frac <= 1.0):
         errors.append("station: need 0 < min_box_frac < max_box_frac <= 1")
+    if st.pad_method not in ("auto", "outlet", "reach"):
+        errors.append(f"station.pad_method must be auto|outlet|reach, got '{st.pad_method}'")
+    oz = st.outlet_zone
+    if oz:
+        if len(oz) != 4 or not all(isinstance(v, (int, float)) for v in oz):
+            errors.append("station.outlet_zone must be [x, y, w, h] fractions or []")
+        else:
+            x, y, w, h = oz
+            if not (0.0 <= x < 1.0 and 0.0 <= y < 1.0 and 0.0 < w <= 1.0 and 0.0 < h <= 1.0
+                    and x + w <= 1.0 + 1e-9 and y + h <= 1.0 + 1e-9):
+                errors.append(f"station.outlet_zone {oz} out of bounds (fractions of frame)")
+    elif st.pad_method == "outlet":
+        errors.append("station.pad_method is outlet but station.outlet_zone is not "
+                      "set — run tools/station_setup.py (step 3)")
+    if not (0.0 < st.outlet_min_change < 1.0):
+        errors.append("station.outlet_min_change must be between 0 and 1")
     if st.box_color not in ("brown", "any"):
         errors.append(f"station.box_color must be brown|any, got '{st.box_color}'")
     if not (0.0 < st.depart_cover < st.present_cover <= 1.0):
@@ -353,8 +390,9 @@ def _validate(cfg: AppConfig) -> None:
         errors.append("station.learn_frames must be >= 1")
     if st.pieces_per_visit < 1:
         errors.append("station.pieces_per_visit must be >= 1")
-    for name in ("still_seconds", "confirm_seconds", "depart_seconds",
-                 "quiet_seconds", "absorb_seconds", "relearn_seconds"):
+    for name in ("still_seconds", "confirm_seconds", "confirm_busy_seconds",
+                 "depart_seconds", "quiet_seconds", "absorb_seconds",
+                 "relearn_seconds", "outlet_quiet_seconds"):
         if getattr(st, name) <= 0:
             errors.append(f"station.{name} must be > 0")
 

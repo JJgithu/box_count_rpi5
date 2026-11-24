@@ -34,6 +34,9 @@ W, H = 640, 480
 OUTLET_X, OUTLET_Y = 320, 52          # where pads come out of the machine
 ROLLER_TOP, ROLLER_BOTTOM = 70, 410
 BOX_TOP = 118                         # top edge of the box body when parked
+# Where the pad hangs out of the machine in this scene, [x, y, w, h] fractions
+# (what tools/station_setup.py step 3 measures on a real station).
+OUTLET_ZONE = [0.409, 0.092, 0.181, 0.283]
 
 
 def _background(rng: np.random.Generator) -> np.ndarray:
@@ -140,7 +143,9 @@ def generate_station_video(path: str, pads_per_box=(3, 2), fps: int = 20,
                            box_at_start: int = 0, pre_hung: bool = True,
                            empty_reach: bool = False, hold_s: float = 0.3,
                            nudge_px: int = 0, light_step: float = 0.0,
-                           shadow: bool = False, noise_sigma: float = 2.0) -> dict:
+                           shadow: bool = False, noise_sigma: float = 2.0,
+                           settle_s: float = 0.8, end_s: float = 0.8,
+                           stay_hand: bool = False) -> dict:
     """Write the video; return the ground truth.
 
     box_at_start: if > 0, a box is already standing on the spot when the
@@ -153,6 +158,12 @@ def generate_station_video(path: str, pads_per_box=(3, 2), fps: int = 20,
     light_step: from the middle of the video on, the whole picture is this
     much brighter (0.1 = +10%: lights switched, a door opened).
     shadow: the packer's shadow follows the hand over the box.
+    settle_s / end_s: pause after the box stops before the first reach, and
+    after the last pad before the box is pushed on (0 = a packer who never
+    stops moving).
+    stay_hand: between pads the hand goes straight back up to the outlet for
+    the next pad instead of leaving the box (with gap_s=0 the box is never
+    free of movement while it is packed).
     """
     rng = np.random.default_rng(seed)
     prng = random.Random(seed)
@@ -220,10 +231,11 @@ def generate_station_video(path: str, pads_per_box=(3, 2), fps: int = 20,
             state["box"]["x"] = int(_ease(x0, x1, (i + 1) / n))
         emit(S(sec), f)
 
-    def pack_pad(box):
+    def pack_pad(box, last: bool = True):
         rest = (state["base_x"], H + 30)
+        start = state["hand"] if (stay_hand and state["hand"] is not None) else rest
         grab = (OUTLET_X + prng.randint(-6, 6), 118)
-        move_hand(rest, grab, 0.5)
+        move_hand(start, grab, 0.5)
         wait_hand = S(0.25)
         emit(wait_hand, lambda i, n: machine_tick())
         # tear it off: the outlet is empty for a moment, then the next pad
@@ -240,6 +252,8 @@ def generate_station_video(path: str, pads_per_box=(3, 2), fps: int = 20,
         box["contents"].append((tex, mask, tx, ty))
         emit(S(hold_s), lambda i, n: (machine_tick(), state.__setitem__(
             "hand", (target[0] + (i % 3) - 1, target[1]))))
+        if stay_hand and not last:
+            return                       # straight on to the next pad
         move_hand(target, rest, 0.45)
         state["hand"] = None
 
@@ -254,13 +268,15 @@ def generate_station_video(path: str, pads_per_box=(3, 2), fps: int = 20,
         else:
             box["x"] = park_x
         t_half_in = t_in + S(0.5) if slide_in else t_in
-        wait(0.8)
+        if settle_s > 0:
+            wait(settle_s)
         for k in range(n_pads):
             if nudge_px and k == n_pads - 1:
                 slide_box(park_x, park_x + nudge_px, 0.3)
                 wait(0.4)
-            pack_pad(box)
-            wait(gap_s)
+            pack_pad(box, last=(k == n_pads - 1))
+            if gap_s > 0 and k < n_pads - 1:
+                wait(gap_s)
         if empty_reach:
             rest = (state["base_x"], H + 30)
             spot = (box["x"] + bw * 0.5, BOX_TOP + bh * 0.55)
@@ -269,8 +285,8 @@ def generate_station_video(path: str, pads_per_box=(3, 2), fps: int = 20,
                 "hand", (spot[0] + 3 * ((i // 2) % 3 - 1), spot[1]))))
             move_hand(spot, rest, 0.45)
             state["hand"] = None
-            wait(gap_s)
-        wait(0.8)
+        if end_s > 0:
+            wait(end_s)
         x_now = box["x"]
         t_out = len(frames)
         slide_box(x_now, W + 40, 1.0)

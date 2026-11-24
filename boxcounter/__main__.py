@@ -260,9 +260,14 @@ def main(argv=None) -> int:
                   f"the packing spot")
             print(f"  zone     : {st.zone}  (box size {st.min_box_frac:.0%}"
                   f"-{st.max_box_frac:.0%} of the view, colour: {st.box_color})")
-            print(f"  pads     : {'counted per reach' if st.count_pads else 'off'}"
-                  + (f" (a reach must change {st.pad_min_change:.0%} of the box)"
-                     if st.count_pads else ""))
+            if not st.count_pads:
+                print("  pads     : off")
+            elif st.pad_method == "outlet" and st.outlet_zone:
+                print("  pads     : counted at the machine outlet (experimental)")
+            else:
+                print(f"  pads     : counted per reach (a reach must change "
+                      f"{st.pad_min_change:.0%} of the box)")
+            print(f"  outlet   : {st.outlet_zone if st.outlet_zone else 'not measured (setup step 3)'}")
         else:
             print(f"  counting : conveyor — axis={cfg.counting.axis} "
                   f"line={cfg.counting.line_position} dir={cfg.counting.direction}")

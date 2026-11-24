@@ -128,7 +128,14 @@ station:
   max_box_frac: 0.95          # arms and the hanging pad are smaller than this
   box_color: brown            # brown = must look like cardboard (keeps dark
                               # sleeves and other objects out); any = no check
+  outlet_zone: []             # where pads hang out of the machine, measured
+                              # by tools/station_setup.py step 3. That paper
+                              # is then never taken for part of a box or for a
+                              # hand over it. [] = not measured
   count_pads: true            # count pads per reach into the box
+  pad_method: auto            # auto/reach = per reach into the box;
+                              # outlet = experimental: count pads where they
+                              # come out of the machine (needs outlet_zone)
   # A REACH: movement over the box, then the box quiet again for
   # quiet_seconds. If enough of the inside of the box looks different
   # afterwards (pad_min_change), a pad went in.
@@ -144,6 +151,8 @@ station:
                               # different count; 0 = no check
   min_pack_seconds: 3.0       # shorter stays at the spot are not boxes
   confirm_seconds: 0.6        # how long a box must stand still to be seen
+  confirm_busy_seconds: 1.2   # ...or this long if hands never stop moving
+                              # over it (packer starts the moment it arrives)
   depart_seconds: 0.4         # spot empty this long = the box has left
   # Every reach and its decision is written to data/boxcounter.log, e.g.
   #   "Box 4 reach 2: 23% of the box changed (pad needs 6%) -> +1 pad"

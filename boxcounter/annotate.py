@@ -99,6 +99,11 @@ def draw_station_overlay(frame: np.ndarray, ov: dict, total: int, fps: float,
     rx, ry, rw, rh = ov["roi"]
     if (rx, ry, rw, rh) != (0, 0, fw, fh):
         cv2.rectangle(out, (rx, ry), (rx + rw - 1, ry + rh - 1), _BLUE, 1)
+    if ov.get("outlet"):
+        ox, oy, ow, oh = ov["outlet"]
+        cv2.rectangle(out, (ox, oy), (ox + ow - 1, oy + oh - 1), (60, 200, 240), 1)
+        cv2.putText(out, "PAD OUTLET", (ox + 3, oy + oh - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (60, 200, 240), 1, cv2.LINE_AA)
     zx, zy, zw, zh = ov["zone"]
     cv2.rectangle(out, (zx, zy), (zx + zw - 1, zy + zh - 1), _TEAL, 1)
     cv2.putText(out, "PACKING ZONE", (zx + 4, zy + 14),
