@@ -249,7 +249,14 @@ def main() -> int:
     print("  Two pictures: the empty packing spot, then an empty box on it.\n"
           "  Stop the counter first if it is running (the camera can only be\n"
           "  used by one program):  sudo systemctl stop boxcounter")
-    grab = Grabber(cfg, args.source)
+    try:
+        grab = Grabber(cfg, args.source)
+    except Exception as exc:
+        _bad(f"could not open the camera ({exc}).")
+        print("  Is the counter still running? Only one program can use the\n"
+              "  camera: stop it (Ctrl-C in its window, or\n"
+              "  sudo systemctl stop boxcounter) and run the setup again.")
+        return 1
     try:
         _h("Step 1 of 2 — the EMPTY spot")
         print("  Clear the rollers in front of the machine: no box, no hands.\n"
