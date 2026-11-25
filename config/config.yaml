@@ -120,23 +120,32 @@ station:
   # --- counting.mode: station -------------------------------------------
   # Measured for your box by:  python3 tools/station_setup.py
   # (it fills in zone / min_box_frac / max_box_frac / box_color).
-  zone: [0.15, 0.10, 0.70, 0.80]  # where the box stands while it is packed
-                              # [x, y, w, h] fractions of the picture; a box
-                              # counts only with its CENTRE inside, so boxes
-                              # queued beside the spot are ignored
-  min_box_frac: 0.06          # smallest box, fraction of the picture. Hands,
-  max_box_frac: 0.95          # arms and the hanging pad are smaller than this
-  box_color: brown            # brown = must look like cardboard (keeps dark
-                              # sleeves and other objects out); any = no check
-  outlet_zone: []             # where pads hang out of the machine, measured
-                              # by tools/station_setup.py step 3. That paper
-                              # is then never taken for part of a box or for a
-                              # hand over it. [] = not measured
-  count_pads: true            # count pads per reach into the box
-  pad_method: auto            # auto/reach = per reach into the box;
-                              # outlet = experimental: count pads where they
-                              # come out of the machine (needs outlet_zone)
-  # A REACH: movement over the box, then the box quiet again for
+  zone: [0.15, 0.10, 0.70, 0.80]  # where boxes are looked for: the packing
+                              # spot plus a margin, [x, y, w, h] fractions of
+                              # the picture. Whatever is outside (the packer
+                              # standing at the conveyor, boxes queued beside
+                              # the spot) is ignored
+  min_box_frac: 0.06          # smallest box, fraction of the picture. Hands
+  max_box_frac: 0.95          # and arms are smaller than this
+  box_color: brown            # brown = only cardboard-coloured things can be
+                              # a box (keeps dark clothes and sleeves out);
+                              # any = no colour check
+  outlet_zone: []             # where the pad hangs out of the machine,
+                              # measured by tools/station_setup.py step 3.
+                              # That paper is never taken for part of a box,
+                              # and pads are counted there. [] = not measured
+  count_pads: true
+  pad_method: auto            # auto   = at the machine where outlet_zone is
+                              #          measured, otherwise per reach
+                              # outlet = at the machine (needs outlet_zone)
+                              # reach  = per reach into the box
+  # AT THE MACHINE: the paper just below the outlet is watched. The pad
+  # hanging there gone, or a different pad hanging there = one pad taken.
+  # Works however the pad is stuffed into the box and without any pause
+  # between pads; each new pad only has to hang still for a moment.
+  outlet_quiet_seconds: 0.4   # how long the paper must hang still to be
+                              # compared with the pad before
+  # PER REACH: movement over the box, then the box quiet again for
   # quiet_seconds. If enough of the inside of the box looks different
   # afterwards (pad_min_change), a pad went in.
   quiet_seconds: 0.5          # pads counted TOO LOW (two pads merge into one)
@@ -154,9 +163,10 @@ station:
   confirm_busy_seconds: 1.2   # ...or this long if hands never stop moving
                               # over it (packer starts the moment it arrives)
   depart_seconds: 0.4         # spot empty this long = the box has left
-  # Every reach and its decision is written to data/boxcounter.log, e.g.
+  # Every decision is written to data/boxcounter.log, e.g.
+  #   "Outlet: a pad was taken (the next one hangs there)"
   #   "Box 4 reach 2: 23% of the box changed (pad needs 6%) -> +1 pad"
-  # which is what to look at when tuning the two numbers above.
+  #   "Something at the spot is not taken as a box: too small to be a box ..."
 
 packing:
   # --- counting.mode: conveyor only ---------------------------------------

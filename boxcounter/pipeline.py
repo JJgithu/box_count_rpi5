@@ -106,7 +106,8 @@ class Pipeline:
         if enable_web if enable_web is not None else cfg.web.enabled:
             self.web = WebUI(cfg.web, self.state,
                              reset_cb=self.request_reset,
-                             recent_cb=self.store.recent)
+                             recent_cb=self.store.recent,
+                             data_dir=cfg.output.data_dir)
 
         self.status: Optional[StatusDisplay] = None
         if self.use_status:

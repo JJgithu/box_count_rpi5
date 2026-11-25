@@ -90,6 +90,7 @@ _PAGE = """<!doctype html>
     </div>
     <div id="statenow" style="margin-top:10px;color:#7fd1b9;font-size:14px"></div>
     <div id="notenow" style="margin-top:2px;color:#9aa4b0;font-size:13px"></div>
+    <div style="margin-top:8px;font-size:13px"><a href="/snapshot.jpg" style="color:#7fd1b9">snapshot</a> &middot; <a href="/files" style="color:#7fd1b9">files (clips, pictures, log)</a></div>
     <div id="packcard" style="display:none">
       <div class="label" style="margin-top:16px">Packing</div>
       <div class="metrics">
@@ -180,14 +181,34 @@ tick();
 """
 
 
+# What the dashboard hands out from the data folder: pictures, recorded
+# clips, the decision log, the CSVs.
+_SHAREABLE = (".jpg", ".jpeg", ".png", ".mp4", ".txt", ".log", ".csv")
+
+_FILES_PAGE = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Box counter files</title>
+<style>body{font-family:system-ui,sans-serif;background:#0f1419;color:#e6e6e6;
+margin:16px} a{color:#7fd1b9} td{padding:4px 12px 4px 0;font-size:14px}
+p{color:#9aa4b0;font-size:14px;max-width:60em}</style></head><body>
+<h3>Files from this counter</h3>
+<p>Tap a file to download it: setup pictures (setup_*.jpg), recorded clips
+(recordings/), picture sheets (sheets/), the decision log (boxcounter.log).
+<a href="/snapshot.jpg">snapshot.jpg</a> is the camera picture right now,
+next to what the counter sees. <a href="/">Back to the dashboard</a></p>
+<table>%ROWS%</table></body></html>"""
+
+
 class WebUI:
     def __init__(self, cfg: WebConfig, state: SharedState,
                  reset_cb: Optional[Callable[[], None]] = None,
-                 recent_cb: Optional[Callable[[int], list]] = None):
+                 recent_cb: Optional[Callable[[int], list]] = None,
+                 data_dir: Optional[str] = None):
         self.cfg = cfg
         self.state = state
         self.reset_cb = reset_cb
         self.recent_cb = recent_cb
+        self.data_dir = data_dir
         self._thread: Optional[threading.Thread] = None
 
     def _mjpeg_generator(self, getter):
@@ -213,8 +234,41 @@ class WebUI:
                        + jpg.tobytes() + b"\r\n")
             time.sleep(0.1)  # ~10 fps per viewer is plenty for monitoring
 
+    def _snapshot(self) -> Optional[bytes]:
+        """One JPEG: the camera picture with what the counter drew on it,
+        next to what the counter "sees". Easy to save and send."""
+        import cv2
+        frame, mask = self.state.get_frame(), self.state.get_mask()
+        if frame is None:
+            return None
+        if mask is not None:
+            if mask.ndim == 2:
+                mask = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+            if mask.shape[:2] != frame.shape[:2]:
+                mask = cv2.resize(mask, (frame.shape[1], frame.shape[0]),
+                                  interpolation=cv2.INTER_NEAREST)
+            frame = cv2.hconcat([frame, mask])
+        ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 88])
+        return jpg.tobytes() if ok else None
+
+    def _file_list(self) -> list:
+        """What can be downloaded from the data folder: (path, bytes)."""
+        import os
+        if not self.data_dir or not os.path.isdir(self.data_dir):
+            return []
+        out = []
+        for root, dirs, files in os.walk(self.data_dir):
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            for name in files:
+                if name.lower().endswith(_SHAREABLE):
+                    full = os.path.join(root, name)
+                    out.append((os.path.relpath(full, self.data_dir).replace(os.sep, "/"),
+                                os.path.getsize(full), os.path.getmtime(full)))
+        out.sort(key=lambda f: -f[2])
+        return out[:200]
+
     def _build_app(self):
-        from flask import Flask, Response, jsonify
+        from flask import Flask, Response, abort, jsonify, send_from_directory
 
         app = Flask(__name__)
         logging.getLogger("werkzeug").setLevel(logging.WARNING)
@@ -245,6 +299,32 @@ class WebUI:
         def mask():
             return Response(self._mjpeg_generator(self.state.get_mask),
                             mimetype="multipart/x-mixed-replace; boundary=frame")
+
+        @app.route("/snapshot.jpg")
+        def snapshot():
+            jpg = self._snapshot()
+            if jpg is None:
+                abort(503)
+            return Response(jpg, mimetype="image/jpeg",
+                            headers={"Cache-Control": "no-store"})
+
+        @app.route("/files")
+        def files():
+            rows = "".join(
+                f'<tr><td><a href="/files/{path}">{path}</a></td>'
+                f'<td style="text-align:right">{size / 1e6:.1f} MB</td>'
+                f'<td>{time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))}</td></tr>'
+                for path, size, mtime in self._file_list())
+            return _FILES_PAGE.replace("%ROWS%", rows or
+                                       '<tr><td colspan="3">nothing yet</td></tr>')
+
+        @app.route("/files/<path:name>")
+        def file(name):
+            if not self.data_dir or not name.lower().endswith(_SHAREABLE):
+                abort(404)
+            import os
+            return send_from_directory(os.path.abspath(self.data_dir), name,
+                                       as_attachment=True)
 
         return app
 

@@ -13,6 +13,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
+from make_real_station_video import generate_real_station_video  # noqa: E402
 from make_station_video import OUTLET_ZONE, generate_station_video  # noqa: E402
 
 from boxcounter.camera import flicker_safe_exposure         # noqa: E402
@@ -176,15 +177,92 @@ def test_hands_working_nonstop_never_split_or_lose_a_box(tmp_path, kw):
     # rest cuts it in two: the arm must not become part of the box
     dict(seed=9, pads_per_box=(2, 3), box_size=(150, 110), fps=30),
 ], ids=["default", "pause-at-outlet", "small-box"])
-def test_outlet_zone_keeps_counting_exact(tmp_path, kw):
+def test_outlet_zone_keeps_reach_counting_exact(tmp_path, kw):
     """With the outlet measured (setup step 3), the hanging paper is left out
-    of the box; counting stays exact."""
+    of the box; counting per reach stays exact."""
     video = tmp_path / "v.mp4"
+    kw = dict(kw)
     kw.setdefault("fps", FPS)
     truth = generate_station_video(str(video), **kw)
     cfg = StationConfig()
     cfg.outlet_zone = list(OUTLET_ZONE)
+    cfg.pad_method = "reach"
     check(run_station(video, cfg), truth)
+
+
+# -- the real station: big hanging pad, packer right at the box ---------------------
+
+def real_station(tmp_path, outlet=True, box_color=None, **kw):
+    """Video of the realistic station plus the config the setup tool makes
+    from its three pictures."""
+    import station_setup
+    kw.setdefault("fps", FPS)
+    video = tmp_path / "real.mp4"
+    truth = generate_real_station_video(str(video), setup_dir=str(tmp_path), **kw)
+    app = AppConfig()
+    empty = cv2.imread(str(tmp_path / "setup_empty.png"))
+    box = cv2.imread(str(tmp_path / "setup_box.png"))
+    after = cv2.imread(str(tmp_path / "setup_outlet.png"))
+    res = station_setup.analyse(empty, box, app)
+    assert res["found"]
+    updates = station_setup.propose(res, app)
+    if outlet:
+        out = station_setup.find_outlet(box, after, app, res)
+        station_setup.add_outlet(updates, out, res)
+        assert updates.get("station.outlet_zone"), "the setup must find the outlet"
+        assert station_setup.check_outlet(box, after, out["zone"], res)["ok"]
+    cfg = app.station
+    for key, value in updates.items():
+        if key.startswith("station."):
+            setattr(cfg, key.split(".", 1)[1], value)
+    if box_color:
+        cfg.box_color = box_color
+    return video, truth, cfg
+
+
+@pytest.mark.parametrize("kw", [
+    dict(seed=1, pads_per_box=(3, 2, 4)),
+    # the hand never leaves the box and nothing ever pauses
+    dict(seed=19, pads_per_box=(3, 2, 3), stay_hand=True, gap_s=0.0,
+         settle_s=0.0, end_s=0.0),
+    # pushing the hanging pad aside, re-arranging paper in the box: no pads
+    dict(seed=23, pads_per_box=(2, 2, 2), brush=True, rearrange=True),
+    # the machine takes its time: the outlet is bare for a while
+    dict(seed=11, pads_per_box=(3, 2), emerge_delay_s=1.5, emerge_s=1.0),
+    # the pad is grabbed right at the outlet; the next follows at once
+    dict(seed=22, pads_per_box=(3, 2), grab_high=True, emerge_delay_s=0.05,
+         emerge_s=0.3),
+    dict(seed=4, pads_per_box=(2, 3), box_size=(180, 200)),
+], ids=["plain", "never-pauses", "brush-and-rearrange", "slow-machine",
+        "grabbed-at-outlet", "small-box"])
+def test_real_station_pads_counted_at_the_machine(tmp_path, kw):
+    """The pad hangs deep into the box and is replaced by the machine on its
+    own; the packer stands against the box. Pads are counted where they
+    come out: one per pad pulled off, however it is stuffed in."""
+    video, truth, cfg = real_station(tmp_path, **kw)
+    check(run_station(video, cfg), truth)
+
+
+@pytest.mark.parametrize("kw", [
+    dict(seed=8, pads_per_box=(3, 2, 2), packer_leaves=True),
+    dict(seed=15, pads_per_box=(1, 1, 1, 1)),
+    dict(seed=7, pads_per_box=(3, 2, 2), packer_at_start=True),
+    dict(seed=6, pads_per_box=(3, 2, 2), box_gap_s=0.5),
+], ids=["packer-steps-in-and-out", "four-boxes", "packer-there-at-start", "short-gaps"])
+@pytest.mark.parametrize("outlet", [True, False], ids=["outlet", "no-outlet"])
+def test_real_station_every_box_is_counted_without_the_colour_check(tmp_path, kw, outlet):
+    """box_color: any. The packer's dark shape touches the box in the picture
+    and its flickering edge reaches the picture edge: the box must not be
+    thrown away as "an arm", nor swallowed by the packer. Every box counts,
+    with its time — whether or not setup step 3 was done."""
+    video, truth, cfg = real_station(tmp_path, outlet=outlet, box_color="any", **kw)
+    events = run_station(video, cfg)
+    assert len(events) == truth["boxes"], (
+        f"boxes: counted {len(events)}, truth {truth['boxes']}")
+    for e, t in zip(events, truth["pack_seconds"]):
+        assert abs(e.pack_seconds - t) < 2.0
+    if outlet:
+        assert [e.pieces for e in events] == truth["pads"]
 
 
 def test_pads_not_counted_when_disabled(tmp_path):
@@ -315,6 +393,56 @@ def test_setup_tool_finds_the_pad_outlet(tmp_path):
     over_box = {"zone": [x / ww, y / wh, w / ww, h / wh], "frac": 0.1}
     assert station_setup.add_outlet(updates, over_box, res) > station_setup.MAX_HIDDEN
     assert "station.outlet_zone" not in updates
+
+
+# -- showing what the counter saw ---------------------------------------------------
+
+def test_dashboard_snapshot_and_file_downloads(tmp_path):
+    from boxcounter.config import WebConfig
+    from boxcounter.webui import SharedState, WebUI
+    (tmp_path / "recordings").mkdir()
+    (tmp_path / "recordings" / "clip_1.mp4").write_bytes(b"x" * 1000)
+    (tmp_path / "boxcounter.log").write_text("Box counted\n")
+    (tmp_path / "counts.db").write_bytes(b"db")
+    state = SharedState()
+    state.update(np.full((480, 640, 3), 90, np.uint8),
+                 np.zeros((240, 320, 3), np.uint8), {})
+    client = WebUI(WebConfig(), state, data_dir=str(tmp_path))._build_app().test_client()
+
+    snap = client.get("/snapshot.jpg")
+    assert snap.status_code == 200 and snap.mimetype == "image/jpeg"
+    img = cv2.imdecode(np.frombuffer(snap.data, np.uint8), cv2.IMREAD_COLOR)
+    assert img.shape[:2] == (480, 1280)          # camera picture | what it sees
+
+    listing = client.get("/files").get_data(as_text=True)
+    assert "recordings/clip_1.mp4" in listing and "boxcounter.log" in listing
+    assert "counts.db" not in listing            # only pictures, clips, text
+    assert client.get("/files/recordings/clip_1.mp4").data == b"x" * 1000
+    assert client.get("/files/counts.db").status_code == 404
+    assert client.get("/files/../config/config.yaml").status_code == 404
+
+
+def test_report_tool_shows_settings_and_decisions(tmp_path, capsys, monkeypatch):
+    import station_report
+    cfg_path = tmp_path / "config.yaml"
+    text = (ROOT / "config" / "config.yaml").read_text()
+    text, _ = set_values(text, {"output.data_dir": str(tmp_path / "data")})
+    cfg_path.write_text(text)
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "boxcounter.log").write_text(
+        "2026-01-01 10:00:00 INFO boxcounter.station: Box at the station (20% of the view)\n"
+        "2026-01-01 10:00:01 DEBUG x: noise\n"
+        "2026-01-01 10:00:05 INFO boxcounter.station: Outlet: a pad was taken (the next one hangs there)\n"
+        "2026-01-01 10:00:09 INFO boxcounter.station: Something at the spot is not taken as a box: too small\n")
+    cv2.imwrite(str(data / "setup_box.jpg"), np.full((480, 640, 3), 120, np.uint8))
+    monkeypatch.setattr(sys, "argv", ["station_report.py", "--config", str(cfg_path)])
+    assert station_report.main() == 0
+    out = capsys.readouterr().out
+    assert "zone" in out and "a pad was taken" in out and "not taken as a box" in out
+    assert "noise" not in out
+    assert (data / "report" / "report.txt").exists()
+    assert (data / "report" / "setup.jpg").exists()
 
 
 # -- camera -----------------------------------------------------------------------

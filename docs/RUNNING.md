@@ -14,7 +14,9 @@ itself, survives you logging out — use this in production).
 > `python3 tools/station_setup.py`, and see [STATION.md](STATION.md) for what
 > the `now:` / `last:` lines under the panel mean, the tuning table, and how
 > to record a clip (`python3 -m boxcounter --record`). Every box and every
-> reach, with the reason it did or did not count, is in `data/boxcounter.log`.
+> pad, with the reason it did or did not count, is in `data/boxcounter.log`;
+> `python3 tools/station_report.py` prints the settings and the last
+> decisions in one go.
 
 ---
 

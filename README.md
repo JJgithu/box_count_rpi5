@@ -14,7 +14,7 @@ Two counting modes (`counting.mode` in `config/config.yaml`):
 
 | Mode | For | A box is counted when… |
 |---|---|---|
-| **`station`** (default) | a packing spot in front of a paper machine: the box stops, is filled, then slides on along the rollers or is lifted off — **[docs/STATION.md](docs/STATION.md)** | …it **leaves** the spot (any direction). Pads are counted per reach into the box. |
+| **`station`** (default) | a packing spot in front of a paper machine: the box stops, is filled, then slides on along the rollers or is lifted off — **[docs/STATION.md](docs/STATION.md)** | …it **leaves** the spot (any direction). Pads are counted where they come out of the machine (or per reach into the box). |
 | `conveyor` | boxes passing a point without stopping | …it crosses a counting line in the travel direction. |
 
 ```
@@ -23,9 +23,9 @@ Two counting modes (`counting.mode` in `config/config.yaml`):
         ▼
   ┌──────────────┐  ┌───────────────────┐  ┌──────────────────────┐
   │ picture of   │─▶│ still + box-sized │─▶│ box at the station:  │
-  │ the EMPTY    │  │ + cardboard + in  │  │ reaches -> pads,     │
-  │ spot (kept   │  │ the zone = a box  │  │ leaves -> counted    │
-  │ up to date)  │  │ (hands never are) │  │ with pads + time     │
+  │ the EMPTY    │  │ + cardboard + in  │  │ pads pulled off the  │
+  │ spot (kept   │  │ the zone = a box  │  │ machine -> pads,     │
+  │ up to date)  │  │ (hands never are) │  │ leaves -> counted    │
   └──────────────┘  └───────────────────┘  └──────────┬───────────┘
                                                       ▼
                              SQLite + daily CSV · GPIO pulse (PLC)
@@ -48,18 +48,23 @@ it, you can swap in a TFLite/NCNN model without touching tracking or counting.
 Station mode:
 
 - **Hands are never boxes**: a box must stand perfectly still, be box-sized,
-  look like cardboard and sit at the packing spot; a hand or arm is none of
-  these for long. (The counting-line method counted a hand pulling a pad
-  towards the packer — this mode has no line.)
+  look like cardboard and sit in the packing zone; a hand or arm is none of
+  these for long, and an arm lying across a box is cut off its outline.
+  Whatever is outside the zone — the packer standing right against the box —
+  is ignored.
 - **Direction-free**: a box may arrive and leave either way along the
   rollers, or be lifted on and off.
-- **Pads per reach, judged on the box itself**: the paper hanging from the
-  machine's outlet belongs to the picture of the empty spot, so the machine
-  pushing out the next pad is not a pad; a box shoved along the rollers is
-  followed, not counted as a pad; a soft shadow is not a pad.
-- **Explains itself**: the panel says what the camera sees right now and why
-  the last reach did or did not count; every decision goes to
-  `data/boxcounter.log`. `--record` saves the raw video for exact replays.
+- **Pads counted where they come out of the machine**: the paper below the
+  outlet is watched; the pad hanging there gone, or a different pad hanging
+  there, is one pad taken — however it is stuffed into the box, and without
+  any pause between pads. The same pad pushed aside, or paper re-arranged in
+  the box, is not a pad. (Without the outlet measured: per reach into the
+  box.)
+- **Explains itself**: the panel says what the camera sees right now, why
+  something at the spot is not taken as a box, and what it decided last;
+  every decision goes to `data/boxcounter.log`. `--record` saves the raw
+  video for exact replays; `tools/station_report.py` and the dashboard's
+  `/files` page get it all off the Pi.
 - **No light flicker**: exposure is kept to whole mains-flicker periods.
 
 Both modes:
@@ -154,7 +159,7 @@ boxcounter/          the application package
   camera.py            Picamera2 / video / USB frame sources
   detector.py          color background subtraction + open-box fusion
   tracker.py           predictive centroid tracker
-  station.py           packing-station mode: boxes, pads per reach, pack time
+  station.py           packing-station mode: boxes, pads at the outlet or per reach, pack time
   counter.py           directional line counter with hysteresis (conveyor)
   packing.py           pieces-per-box + pack-time monitor (conveyor)
   pipeline.py          main loop wiring it all together
@@ -165,7 +170,7 @@ boxcounter/          the application package
   asciiview.py         camera view as text, for calibrating over SSH
   configedit.py        comment-preserving config writer
 config/config.yaml   all tunables, heavily commented
-tools/               station_setup + station_sheet (station mode), wizard (conveyor mode),
+tools/               station_setup + station_report + station_sheet (station mode), wizard (conveyor mode),
                      calibrate, export_csv, capture background, synthetic
                      videos (make_station_video / make_test_video), benchmark
 tests/               unit + exact-count end-to-end tests

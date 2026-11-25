@@ -12,20 +12,26 @@ decided what it decided. The full guide is [STATION.md](STATION.md).
 - Run `python3 tools/station_setup.py` so the counter knows your box size and
   where the packing spot is.
 
-**`now:` never leaves `waiting for a box` with a box on the spot**
-- The box is smaller than `station.min_box_frac` of the picture, or its
-  centre is outside `station.zone`: run the setup again with your smallest box.
-
-**`now:` says `ignoring an object at the spot: not cardboard-coloured`**
-- White or printed boxes, or unusual lighting: set `station.box_color: any`.
-
-**`now:` says `… reaches in from the picture edge like an arm` for a real box**
-- The camera sees only part of the box. Raise or turn the camera so the whole
-  box with its flaps is in the picture (the setup tool reports this).
+**`now:` stays on `waiting for a box` with a box on the spot**
+- After a second it adds the reason in brackets, and the log gets a line
+  `Something at the spot is not taken as a box: …`:
+  - `too small to be a box (N% of the picture, boxes are at least M%)` —
+    lower `station.min_box_frac` below N%, or run the setup with this box.
+  - `too big to be a box` — raise `station.max_box_frac`, or run the setup.
+  - `not cardboard-coloured` — white or printed boxes, or unusual lighting:
+    set `station.box_color: any`.
+  - `it reaches in from the picture edge like an arm` — only a narrow part
+    of the box is in the picture. Raise or turn the camera so the whole box
+    with its flaps is in view (the setup tool reports this).
+- No reason at all: the box stands outside `station.zone`, or the camera has
+  moved since the setup. Run `python3 tools/station_setup.py` again.
 
 **Pads too low or too high**
-- See the tuning table in STATION.md §5 (`quiet_seconds`, `pad_min_change`).
-  The log shows the % change of every reach next to the threshold.
+- `python3 -m boxcounter --check` says how pads are counted: `at the
+  machine` (setup step 3 done) or `per reach into the box`. See the tuning
+  table in STATION.md §5 for each. The log has a line for every pad:
+  `Outlet: a pad was taken (…)`, or `Box 4 reach 2: 23% of the box changed
+  (pad needs 6%) -> +1 pad`.
 
 **Picture shows moving dark bands (lights)**
 - Set `camera.flicker_hz` to your mains frequency (60 in the US, 50 in most

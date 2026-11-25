@@ -262,11 +262,12 @@ def main(argv=None) -> int:
                   f"-{st.max_box_frac:.0%} of the view, colour: {st.box_color})")
             if not st.count_pads:
                 print("  pads     : off")
-            elif st.pad_method == "outlet" and st.outlet_zone:
-                print("  pads     : counted at the machine outlet (experimental)")
+            elif st.pad_method in ("auto", "outlet") and st.outlet_zone:
+                print("  pads     : counted at the machine — each pad pulled off "
+                      "the outlet")
             else:
-                print(f"  pads     : counted per reach (a reach must change "
-                      f"{st.pad_min_change:.0%} of the box)")
+                print(f"  pads     : counted per reach into the box (a reach must "
+                      f"change {st.pad_min_change:.0%} of it)")
             print(f"  outlet   : {st.outlet_zone if st.outlet_zone else 'not measured (setup step 3)'}")
         else:
             print(f"  counting : conveyor — axis={cfg.counting.axis} "

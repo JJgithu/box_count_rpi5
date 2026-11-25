@@ -1,8 +1,9 @@
 # Packing-Station Monitoring
 
-> In the default **packing-station mode**, pads are counted per reach into the
-> box that is standing at the spot — see [STATION.md](STATION.md). This
-> document describes the **conveyor-mode** packing monitor.
+> In the default **packing-station mode**, pads are counted where they come
+> out of the paper machine (or per reach into the box standing at the spot)
+> — see [STATION.md](STATION.md). This document describes the
+> **conveyor-mode** packing monitor.
 
 With `packing.enabled: true`, the system does three things per box:
 

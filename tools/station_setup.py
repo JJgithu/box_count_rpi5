@@ -38,7 +38,8 @@ from boxcounter import asciiview                        # noqa: E402
 from boxcounter.camera import create_source             # noqa: E402
 from boxcounter.config import load_config               # noqa: E402
 from boxcounter.configedit import apply_to_file         # noqa: E402
-from boxcounter.station import brown_mask, foreground   # noqa: E402
+from boxcounter.station import (_WATCH_SAME, brown_mask, foreground,   # noqa: E402
+                                outlet_windows, paper_look, same_pad)
 
 _CSI = "\x1b["
 _BOLD, _DIM, _RESET = f"{_CSI}1m", f"{_CSI}2m", f"{_CSI}0m"
@@ -175,25 +176,45 @@ def find_outlet(box: np.ndarray, after: np.ndarray, cfg, res: dict) -> Optional[
         return None
     ww, wh = size
     # the pad: the biggest change (a hand or the torn pad lying around would
-    # be somewhere else)
+    # be somewhere else) ...
     best = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-    area = int(stats[best, cv2.CC_STAT_AREA])
-    frac = area / float(ww * wh)
     x, y, w, h = (int(v) for v in stats[best, :4])
+    keep = labels == best
+    # ... together with the other patches of the same strip of paper: two
+    # crumpled pads look alike in places, so the change comes in patches one
+    # above the other.
+    # (Only paper-coloured patches: the machine's screen right above the
+    # outlet changes too when a pad is made.)
+    paper = brown_mask(a) | brown_mask(b)
+    for i in range(1, n):
+        if i == best or stats[i, cv2.CC_STAT_AREA] < 0.05 * stats[best, cv2.CC_STAT_AREA]:
+            continue
+        ix, iy, iw, ih = (int(v) for v in stats[i, :4])
+        overlap = min(x + w, ix + iw) - max(x, ix)
+        gap = max(iy - (y + h), y - (iy + ih))
+        patch = labels == i
+        if (overlap >= 0.5 * min(w, iw) and gap <= 0.12 * wh
+                and np.count_nonzero(paper & patch) >= 0.6 * np.count_nonzero(patch)):
+            keep |= patch
+    ys, xs = np.nonzero(keep)
+    x, y = int(xs.min()), int(ys.min())
+    w, h = int(xs.max()) - x + 1, int(ys.max()) - y + 1
+    area = int(np.count_nonzero(keep))
+    frac = area / float(ww * wh)
     mx, my = max(2, int(0.12 * w)), max(2, int(0.12 * h))
     x0, y0 = max(0, x - mx), max(0, y - my)
     x1, y1 = min(ww, x + w + mx), min(wh, y + h + my)
     return {"zone": [round(x0 / ww, 3), round(y0 / wh, 3),
                      round((x1 - x0) / ww, 3), round((y1 - y0) / wh, 3)],
-            "frac": frac, "mask": labels == best}
+            "frac": frac, "mask": keep}
 
 
 def propose(res: dict, cfg) -> dict:
     """Config values for this box."""
     ww, wh = res["size"]
     x, y, w, h = res["bbox"]
-    # The zone is where the box's CENTRE must be: the box's own outline plus
-    # room for it to be put down a bit off the mark.
+    # The zone is where boxes are looked for: the box's own outline plus room
+    # for it to be put down a bit off the mark. What is outside is ignored.
     mx, my = 0.35 * w, 0.35 * h
     zx0, zy0 = max(0.0, (x - mx) / ww), max(0.0, (y - my) / wh)
     zx1, zy1 = min(1.0, (x + w + mx) / ww), min(1.0, (y + h + my) / wh)
@@ -241,6 +262,37 @@ def add_outlet(updates: dict, out: dict, res: dict) -> float:
     return hidden
 
 
+def check_outlet(box: np.ndarray, after: np.ndarray, zone: List[float], res: dict) -> dict:
+    """Can pads be counted at the machine? The counter's own two tests, run
+    on the pictures of step 2 (old pad) and step 3 (next pad): it must see
+    paper right below the outlet in both, and it must tell the two pads
+    apart."""
+    ww, wh = res["size"]
+    fh, fw = box.shape[:2]
+    sx, sy = fw / float(ww), fh / float(wh)
+    _, watch, mouth = outlet_windows(zone, ww, wh)
+
+    def full(r):
+        return (int(round(r[0] * sx)), int(round(r[1] * sy)),
+                int(round(r[2] * sx)), int(round(r[3] * sy)))
+
+    out, patches = {}, []
+    for name, img in (("before", box), ("after", after)):
+        small = cv2.GaussianBlur(cv2.resize(img, (ww, wh), interpolation=cv2.INTER_AREA),
+                                 (3, 3), 0)
+        mx, my, mw, mh = mouth
+        fx, fy, fw_, fh_ = full(mouth)
+        strip = cv2.cvtColor(img[fy:fy + fh_, fx:fx + fw_], cv2.COLOR_BGR2GRAY)
+        out["paper_" + name] = paper_look(small[my:my + mh, mx:mx + mw], strip)
+        fx, fy, fw_, fh_ = full(watch)
+        patches.append(cv2.GaussianBlur(
+            cv2.cvtColor(img[fy:fy + fh_, fx:fx + fw_], cv2.COLOR_BGR2GRAY), (3, 3), 0))
+    out["match"] = same_pad(patches[0], patches[1])
+    out["ok"] = bool(out["paper_before"] and out["paper_after"]
+                     and out["match"] < _WATCH_SAME)
+    return out
+
+
 def save_pictures(out_dir: Path, empty, box, res, updates) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out_dir / "setup_empty.jpg"), empty)
@@ -258,7 +310,7 @@ def save_pictures(out_dir: Path, empty, box, res, updates) -> Path:
         zx, zy, zw, zh = updates["station.zone"]
         cv2.rectangle(img, (int(zx * fw), int(zy * fh)),
                       (int((zx + zw) * fw) - 1, int((zy + zh) * fh) - 1), (170, 180, 70), 2)
-        cv2.putText(img, "PACKING ZONE (box centre must be inside)",
+        cv2.putText(img, "PACKING ZONE (boxes are looked for in here)",
                     (int(zx * fw) + 4, int(zy * fh) + 16), cv2.FONT_HERSHEY_SIMPLEX,
                     0.45, (170, 180, 70), 1, cv2.LINE_AA)
         if updates.get("station.outlet_zone"):
@@ -356,8 +408,9 @@ def main() -> int:
         _ok("got it")
 
         outlet_img = None
-        _h("Step 3 of 3 — where the pads come out (recommended)")
-        print("  Leave the box where it is. Pull the hanging pad off the machine\n"
+        _h("Step 3 of 3 — where the pads come out")
+        print("  This is what lets the counter count pads at the machine.\n"
+              "  Leave the box where it is. Pull the hanging pad off the machine\n"
               "  and put it ASIDE (not in the box, not on the rollers), and let\n"
               "  the machine push out the next one. Then step back.")
         if interactive:
@@ -414,8 +467,14 @@ def main() -> int:
               "        (someone walking by, lights). If the result looks wrong,\n"
               "        run the setup again.")
 
+    # Pads: at the machine if step 3 shows the camera can do it, otherwise
+    # per reach into the box. (Always written, so an outlet measured for an
+    # earlier camera position does not linger.)
+    updates["station.outlet_zone"] = []
+    updates["station.pad_method"] = "auto"
     if outlet_img is not None:
         out = find_outlet(box, outlet_img, cfg, res)
+        out_dir.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(out_dir / "setup_outlet.jpg"), outlet_img)
         if out is None or out["frac"] < 0.002:
             _warn("I could not see the pad change at the machine — is the outlet in\n"
@@ -425,16 +484,32 @@ def main() -> int:
                   "        the outlet was not saved. Run the setup again to retry.")
         else:
             hidden = add_outlet(updates, out, res)
-            if "station.outlet_zone" not in updates:
+            if not updates["station.outlet_zone"]:
                 _warn(f"the pad hangs over {hidden:.0%} of the box as the camera sees it.\n"
                       "        Leaving that much out would hide the box, so the outlet was\n"
-                      "        not saved. That is fine: pads are counted per reach into\n"
-                      "        the box, which does not need it.")
+                      "        not saved. Pads will be counted per reach into the box.")
             else:
                 _ok(f"outlet found: the hanging pad covers {out['frac']:.0%} of the picture")
                 print("        That area is no longer looked at as part of the box"
                       + (f"\n        ({hidden:.0%} of the box; the smallest box size is"
                          " lowered to match)." if hidden > 0.02 else "."))
+                chk = check_outlet(box, outlet_img, out["zone"], res)
+                if chk["ok"]:
+                    _ok("pads will be counted at the machine: every pad pulled off "
+                        "counts once\n        (the camera sees the paper below the outlet "
+                        "and tells the two pads apart)")
+                else:
+                    updates["station.pad_method"] = "reach"
+                    if not (chk["paper_before"] and chk["paper_after"]):
+                        why = ("the camera does not see paper right below the outlet "
+                               "in both pictures")
+                    else:
+                        why = (f"the two pads look the same to the camera "
+                               f"(match {chk['match']:.2f})")
+                    _warn(f"pads cannot be counted at the machine: {why}.\n"
+                          "        They will be counted per reach into the box instead.")
+    else:
+        print("  Step 3 skipped: pads will be counted per reach into the box.")
 
     picture = save_pictures(out_dir, empty, box, res, updates)
     print(f"\n  Pictures saved: {picture} (the box in green, the packing zone\n"
@@ -467,7 +542,8 @@ def main() -> int:
           "      python3 -m boxcounter\n\n"
           "  The line starting with 'now:' says what it sees: 'waiting for a\n"
           "  box', 'box at the station: 2 pads, 14 s', and the line 'last:' says\n"
-          "  why the last reach did or did not count as a pad.")
+          "  what it decided last ('a pad was taken from the machine').\n"
+          "  If something is off:  python3 tools/station_report.py")
     return 0
 
 
