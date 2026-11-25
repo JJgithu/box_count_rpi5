@@ -166,11 +166,22 @@ def test_hands_working_nonstop_never_split_or_lose_a_box(tmp_path, kw):
         assert abs(e.pack_seconds - t) < 2.0
 
 
-def test_outlet_zone_keeps_counting_exact(tmp_path):
+@pytest.mark.parametrize("kw", [
+    dict(pads_per_box=(3, 2, 4)),
+    # the hand pauses at the outlet, inside the zone, and carries the pad
+    # through it: that must stay one reach, not a pad "in the air" plus the
+    # pad landing
+    dict(seed=1, pads_per_box=(3, 2, 4), fps=30),
+    # the zone covers the top of a small box and an arm resting across the
+    # rest cuts it in two: the arm must not become part of the box
+    dict(seed=9, pads_per_box=(2, 3), box_size=(150, 110), fps=30),
+], ids=["default", "pause-at-outlet", "small-box"])
+def test_outlet_zone_keeps_counting_exact(tmp_path, kw):
     """With the outlet measured (setup step 3), the hanging paper is left out
-    of the box and the reaches; counting stays exact."""
+    of the box; counting stays exact."""
     video = tmp_path / "v.mp4"
-    truth = generate_station_video(str(video), pads_per_box=(3, 2, 4), fps=FPS)
+    kw.setdefault("fps", FPS)
+    truth = generate_station_video(str(video), **kw)
     cfg = StationConfig()
     cfg.outlet_zone = list(OUTLET_ZONE)
     check(run_station(video, cfg), truth)
@@ -288,6 +299,22 @@ def test_setup_tool_finds_the_pad_outlet(tmp_path):
     tx, ty, tw, th = OUTLET_ZONE
     # it covers the real outlet's centre
     assert zx <= tx + tw / 2 <= zx + zw and zy <= ty + th / 2 <= zy + zh
+
+    # Saved, and the smallest accepted box is sized by what stays visible.
+    updates = station_setup.propose(res, cfg)
+    hidden = station_setup.add_outlet(updates, out, res)
+    assert 0.0 < hidden <= station_setup.MAX_HIDDEN
+    assert updates["station.outlet_zone"] == out["zone"]
+    visible = res["area_frac"] * (1.0 - hidden)
+    assert updates["station.min_box_frac"] < visible
+
+    # A "pad" hanging over most of the box would hide it: not saved.
+    updates = station_setup.propose(res, cfg)
+    x, y, w, h = res["bbox"]
+    ww, wh = res["size"]
+    over_box = {"zone": [x / ww, y / wh, w / ww, h / wh], "frac": 0.1}
+    assert station_setup.add_outlet(updates, over_box, res) > station_setup.MAX_HIDDEN
+    assert "station.outlet_zone" not in updates
 
 
 # -- camera -----------------------------------------------------------------------

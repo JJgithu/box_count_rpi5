@@ -212,6 +212,35 @@ def propose(res: dict, cfg) -> dict:
     }
 
 
+MAX_HIDDEN = 0.5       # an outlet zone hiding more of the box than this is not saved
+
+
+def box_hidden_by(zone: List[float], res: dict) -> float:
+    """How much of the box, as found in step 2, lies inside the outlet zone.
+    The counter leaves the outlet zone out when it looks for boxes, so that
+    part of the box is invisible to it."""
+    ww, wh = res["size"]
+    zx, zy, zw, zh = zone
+    x0, y0 = int(zx * ww), int(zy * wh)
+    x1, y1 = int((zx + zw) * ww), int((zy + zh) * wh)
+    mask = res["mask"]
+    total = max(1, int(np.count_nonzero(mask)))
+    return float(np.count_nonzero(mask[y0:y1, x0:x1])) / total
+
+
+def add_outlet(updates: dict, out: dict, res: dict) -> float:
+    """Save the outlet zone unless it would hide most of the box; size the
+    smallest accepted box by what stays visible. Returns the hidden part."""
+    hidden = box_hidden_by(out["zone"], res)
+    if hidden > MAX_HIDDEN:
+        return hidden
+    updates["station.outlet_zone"] = out["zone"]
+    if hidden > 0.02:
+        updates["station.min_box_frac"] = round(
+            max(0.02, 0.45 * res["area_frac"] * (1.0 - hidden)), 3)
+    return hidden
+
+
 def save_pictures(out_dir: Path, empty, box, res, updates) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out_dir / "setup_empty.jpg"), empty)
@@ -395,9 +424,17 @@ def main() -> int:
             _warn("too much of the picture changed in step 3 (someone in view?);\n"
                   "        the outlet was not saved. Run the setup again to retry.")
         else:
-            updates["station.outlet_zone"] = out["zone"]
-            _ok(f"outlet found: the hanging pad covers {out['frac']:.0%} of the picture")
-            print("        That area is no longer looked at as part of the box.")
+            hidden = add_outlet(updates, out, res)
+            if "station.outlet_zone" not in updates:
+                _warn(f"the pad hangs over {hidden:.0%} of the box as the camera sees it.\n"
+                      "        Leaving that much out would hide the box, so the outlet was\n"
+                      "        not saved. That is fine: pads are counted per reach into\n"
+                      "        the box, which does not need it.")
+            else:
+                _ok(f"outlet found: the hanging pad covers {out['frac']:.0%} of the picture")
+                print("        That area is no longer looked at as part of the box"
+                      + (f"\n        ({hidden:.0%} of the box; the smallest box size is"
+                         " lowered to match)." if hidden > 0.02 else "."))
 
     picture = save_pictures(out_dir, empty, box, res, updates)
     print(f"\n  Pictures saved: {picture} (the box in green, the packing zone\n"

@@ -75,6 +75,8 @@ _OUTLET_WAIT_S = 3.0       # a box that leaves while a pad is still coming out
                            # waits at most this long for it to be counted
 _SHIFT_MIN_RESPONSE = 0.25 # phase-correlation peak needed to call it a shove
                            # (the silhouette must also fit better there)
+_INSIDE_HOLD = 3.0         # movement over the inside of the box (as a multiple
+                           # of reach_end_motion) that keeps an open reach open
 
 
 def rect_iou(a: Rect, b: Rect) -> float:
@@ -183,7 +185,9 @@ class _Candidate:
                                          # the box at different moments)
 
     def age(self, t: float) -> float:
-        return t - self.first_t
+        # (+1 µs: frame times are sums of 1/fps, and 9 frames at 15 fps must
+        # count as the full 0.6 s, not 0.5999999)
+        return t - self.first_t + 1e-6
 
 
 @dataclass
@@ -220,7 +224,9 @@ class _Session:
     geo_t: float = 0.0
     cov: float = 1.0
     act: float = 0.0
-    # (t, coverage, motion, interior crop, outer crop, outer foreground) for
+    inside: float = 0.0      # movement over the whole inside rectangle
+    busy: float = 0.0        # act, or the inside still clearly moving
+    # (t, coverage, busy, interior crop, outer crop, outer foreground) for
     # each frame of a reach: the reach is judged on its quietest frame, not on
     # whatever frame the quiet period happened to end on (which may already
     # show the next reach's hand coming in).
@@ -376,9 +382,11 @@ class StationMonitor:
         if self.outlet_mask is not None:
             if self.pad_mode == "outlet" and cfg.count_pads:
                 self._outlet_update(tr, gray, motion)
-            # The paper hanging from the outlet is never part of a box.
+            # The paper hanging from the outlet is never part of a box. (Its
+            # movement is not masked: the box's own reach measure already
+            # leaves the outlet out, and a hand tearing a pad off there must
+            # still keep a reach open and keep the box's first picture clean.)
             fg &= ~self.outlet_mask
-            motion = motion & ~self.outlet_mask
         self.fg_since[~fg] = tr
         stable = fg & still
         self._stable = stable
@@ -461,7 +469,15 @@ class StationMonitor:
         ox, oy, ow, oh = s.outer
         s.act = float(np.count_nonzero(
             motion[oy:oy + oh, ox:ox + ow] & s.act_mask)) / s.act_area
-        s.recent_act.append(s.act)
+        # The inside of the box as a whole, including where the paper hanging
+        # from the machine covers it (left out of act). A hand tearing a pad
+        # off there and carrying it into the box moves a lot of it; the
+        # hanging pad swaying moves only its edges. This only keeps a reach
+        # open — it never starts one.
+        ix, iy, iw, ih = s.interior
+        s.inside = float(np.count_nonzero(motion[iy:iy + ih, ix:ix + iw])) / max(1, iw * ih)
+        s.busy = max(s.act, s.inside / _INSIDE_HOLD)
+        s.recent_act.append(s.busy)
 
         if tr - s.start_t > cfg.max_session_seconds:
             log.warning("Box %d has been at the station for over %.0f s; "
@@ -731,13 +747,13 @@ class StationMonitor:
                 # While the box is quiet, keep the "before" picture fresh so
                 # paper slowly settling between reaches is not mistaken for a
                 # new pad at the next reach.
-                if s.act < cfg.reach_end_motion and tr - s.ref_t >= 0.5:
+                if s.busy < cfg.reach_end_motion and tr - s.ref_t >= 0.5:
                     if s.interior_stale:
                         self._set_interior(s)
                     self._take_ref(s, gray, tr)
             return
 
-        s.hist.append((tr, s.cov, s.act, self._crop(gray, s.interior).copy(),
+        s.hist.append((tr, s.cov, s.busy, self._crop(gray, s.interior).copy(),
                        self._crop(gray, s.outer).copy(), self._crop(fg, s.outer).copy()))
         if float(np.median(s.recent_act)) < cfg.reach_end_motion:
             if s.quiet_since is None:
@@ -1114,8 +1130,12 @@ class StationMonitor:
         n, labels, stats, _ = cv2.connectedComponentsWithStats(keep, connectivity=8)
         if n <= 1:
             return comp
-        best = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-        piece = labels == best
+        # Every sizeable cardboard piece, not just the largest: an arm resting
+        # across the box (and the pad outlet, which is left out) can cut the
+        # box into two halves of about the same size.
+        areas = stats[1:, cv2.CC_STAT_AREA]
+        big = 1 + np.flatnonzero(areas >= 0.25 * areas.max())
+        piece = np.isin(labels, big)
         if np.count_nonzero(piece) < 0.5 * np.count_nonzero(comp):
             return comp
         return cv2.morphologyEx(_as_u8(piece), cv2.MORPH_CLOSE, _K7).astype(bool) & comp
@@ -1202,8 +1222,16 @@ class StationMonitor:
             s.ref_exclude = ~self._crop(c.early_known, s.interior).copy()
             s.in_reach = True
             s.reach_start_t = c.first_t
-            s.quiet_since = None
             s.hist.clear()
+            # The hand may already have left the box while it was being
+            # recognised: that quiet time counts towards ending this reach
+            # (otherwise a quick next pad would be taken as part of it).
+            # "Quiet since" = when the last 2% of the box last moved.
+            ox, oy, ow, oh = s.outer
+            lm = self.last_motion[oy:oy + oh, ox:ox + ow][s.act_mask]
+            last = (float(np.percentile(lm, 100.0 * (1.0 - self.cfg.reach_end_motion)))
+                    if lm.size else tr)
+            s.quiet_since = last if last < tr else None
 
     # -- background upkeep ---------------------------------------------------
 

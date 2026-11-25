@@ -80,8 +80,10 @@ python3 tools/station_setup.py
    (not in the box), and let the machine push out the next one. When the new
    pad hangs still and your hands are away, press Enter. From the difference
    it learns where pads hang out of the machine; that paper is then never
-   mistaken for part of the box or for a hand moving over it. (Type `s` and
-   Enter to skip.)
+   mistaken for part of the box, and its swaying never for a hand. (Type `s`
+   and Enter to skip.) If the pad hangs over most of the box as the camera
+   sees it, the setup says so and does not save it — that is fine, counting
+   works without it.
 
 It then draws what it found in the terminal (the box as `@#`, the packing
 zone as `:.:`) and tells you:
